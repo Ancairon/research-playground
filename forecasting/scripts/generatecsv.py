@@ -7,8 +7,7 @@ import os
 IP = 'localhost'                # Netdata server hostname/IP
 CONTEXT = 'system.cpu'            # Single context/chart to fetch
 DIMENSION = 'user'              # Dimension key within the context
-TIME_WINDOW = 3000              # Seconds of history to fetch for training
-LAG_WINDOW = 60                 # Number of lag seconds to use as features
+TIME_WINDOW = 3700              # Seconds of history to fetch for training
 MODEL_OUT = 'rf_model.pkl'      # Path to save/load the trained model
 
 
@@ -43,6 +42,8 @@ def getDataFromAPI(ip, context, dimension, seconds_back):
     df.set_index('timestamp', inplace=True)
 
     print(df)
+    df = df.sort_values(by='timestamp', ascending=True)
+    df.to_csv(f"{context}_{dimension}.csv")
     return df
 
 
