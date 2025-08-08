@@ -21,19 +21,32 @@ parser = argparse.ArgumentParser(
     description="Minimal ExtraTrees TS forecaster with lag features, live plotting, and adaptive retraining"
 )
 parser.add_argument('--csv',              required=True, help='CSV file path')
-parser.add_argument('--date_col',         default='ts',   help='Timestamp column name')
-parser.add_argument('--target_col',       default='value',help='Value column name')
-parser.add_argument('--max_lag',          type=int, default=10,   help='Number of lag features')
-parser.add_argument('--horizon',          type=int, default=1,    help='Forecast horizon (steps ahead)')
-parser.add_argument('--test_size',        type=float, default=0.2, help='Test set fraction')
-parser.add_argument('--n_estimators',     type=int, default=100,  help='ExtraTrees n_estimators')
-parser.add_argument('--random_state',     type=int, default=42,   help='Random seed')
-parser.add_argument('--ip',               default='localhost', help='Netdata server IP')
-parser.add_argument('--context',          default='system.cpu',help='Netdata chart context')
-parser.add_argument('--dimension',        default=None,        help='Netdata dimension key; defaults to target_col')
-parser.add_argument('--window',           type=int, default=None, help='Seconds of history to fetch (>= max_lag)')
-parser.add_argument('--retrain_threshold',type=float, default=None, help='Average one-step error threshold to trigger retrain')
-parser.add_argument('--max_errors',type=int, default=1, help='errors to allow before gathering average.')
+parser.add_argument('--date_col',         default='ts',
+                    help='Timestamp column name')
+parser.add_argument('--target_col',       default='value',
+                    help='Value column name')
+parser.add_argument('--max_lag',          type=int,
+                    default=10,   help='Number of lag features')
+parser.add_argument('--horizon',          type=int, default=1,
+                    help='Forecast horizon (steps ahead)')
+parser.add_argument('--test_size',        type=float,
+                    default=0.2, help='Test set fraction')
+parser.add_argument('--n_estimators',     type=int,
+                    default=100,  help='ExtraTrees n_estimators')
+parser.add_argument('--random_state',     type=int,
+                    default=42,   help='Random seed')
+parser.add_argument('--ip',               default='localhost',
+                    help='Netdata server IP')
+parser.add_argument('--context',          default='system.cpu',
+                    help='Netdata chart context')
+parser.add_argument('--dimension',        default=None,
+                    help='Netdata dimension key; defaults to target_col')
+parser.add_argument('--window',           type=int, default=None,
+                    help='Seconds of history to fetch (>= max_lag)')
+parser.add_argument('--retrain_threshold', type=float, default=None,
+                    help='Average one-step error threshold to trigger retrain')
+parser.add_argument('--max_errors', type=int, default=1,
+                    help='errors to allow before gathering average.')
 args = parser.parse_args()
 
 # Set defaults
@@ -43,6 +56,8 @@ if args.window is None or args.window < args.max_lag:
     args.window = args.max_lag
 
 # Utility to fetch live data
+
+
 def getDataFromAPI(ip, context, dimension, seconds_back):
     url = (
         f"http://{ip}:19999/api/v3/data?"
@@ -53,10 +68,11 @@ def getDataFromAPI(ip, context, dimension, seconds_back):
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     rows = resp.json()['result']['data']
-    df = pd.DataFrame(rows, columns=['timestamp','value'])
+    df = pd.DataFrame(rows, columns=['timestamp', 'value'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
     df.set_index('timestamp', inplace=True)
     return df.asfreq('s').ffill()
+
 
 # 1) Load CSV and index
 df = pd.read_csv(args.csv)
@@ -97,14 +113,15 @@ print(f"Initial training time: {train_time:.3f}s")
 
 # 6) Evaluate metrics
 y_pred = model.predict(X_test)
-mae  = mean_absolute_error(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
 mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
-smape= np.mean(2 * np.abs(y_pred - y_test) / (np.abs(y_test)+np.abs(y_pred))) *100
+smape = np.mean(2 * np.abs(y_pred - y_test) /
+                (np.abs(y_test)+np.abs(y_pred))) * 100
 naive_err = np.mean(np.abs(y_train[1:].values - y_train[:-1].values))
 mase = mae / naive_err
-rmsse= np.sqrt(np.mean(((y_test-y_pred)/naive_err)**2))
-r2   = r2_score(y_test, y_pred)
+rmsse = np.sqrt(np.mean(((y_test-y_pred)/naive_err)**2))
+r2 = r2_score(y_test, y_pred)
 print(f"MAE: {mae:.4f}, RMSE: {rmse:.4f}, MAPE: {mape:.2f}%, SMAPE: {smape:.2f}%")
 print(f"MASE: {mase:.4f}, RMSSE: {rmsse:.4f}, R2: {r2:.4f}")
 
@@ -113,9 +130,11 @@ plt.ion()
 fig, ax = plt.subplots()
 errors = deque(maxlen=args.max_errors)
 prev_pred = None
+holdback = 0
 while True:
     # Fetch live data
-    live_df = getDataFromAPI(args.ip, args.context, args.dimension, args.window)
+    live_df = getDataFromAPI(args.ip, args.context,
+                             args.dimension, args.window)
 
     # One-step error and retraining
     if prev_pred is not None:
@@ -123,9 +142,14 @@ while True:
         errors.append(err)
         if args.retrain_threshold is not None and len(errors) == errors.maxlen:
             avg_err = np.mean(errors)
-            print("AVERAGE_ERROR", avg_err)
+            print("AVERAGE_ERROR", avg_err, holdback)
             if avg_err > args.retrain_threshold:
-                print(f"Retraining model, avg err={avg_err:.4f}")
+                print(f"\n\nRetraining model, avg err={avg_err:.4f}")
+                holdback += 1
+                if holdback == 5:
+                    holdback = 0
+                    print("Major anomaly Holdback for 5 seconds before retrain")
+                    time.sleep(5)
                 start_retrain = time.time()
                 df2 = live_df.copy()
                 for lag in range(1, max_lag + horizon):
@@ -134,15 +158,16 @@ while True:
                 XA = df2[[f'lag_{i}' for i in range(1, max_lag+1)]]
                 yA = df2['value'].shift(-(horizon-1)).dropna()
                 data2 = pd.concat([XA, yA.rename('target')], axis=1).dropna()
-                model.fit(data2[[f'lag_{i}' for i in range(1, max_lag+1)]], data2['target'])
+                model.fit(
+                    data2[[f'lag_{i}' for i in range(1, max_lag+1)]], data2['target'])
                 retrain_time = time.time() - start_retrain
-                print(f"Retraining time: {retrain_time:.3f}s")
+                print(f"Retraining time: {retrain_time:.3f}s\n\n")
                 # pause briefly after retraining before next inference
                 time.sleep(1)  # adjust delay as needed
                 errors.clear()
-                continue
-                errors.clear()
-                continue
+            if avg_err < args.retrain_threshold:
+                print("zeroing the holdback")
+                holdback = 0
 
     # Forecast with timing
     start_inf = time.time()
@@ -150,7 +175,8 @@ while True:
     preds = []
     for _ in range(horizon):
         feat = list(hist_vals)[::-1]
-        Xf = pd.DataFrame([feat], columns=[f'lag_{i}' for i in range(1, max_lag+1)])
+        Xf = pd.DataFrame(
+            [feat], columns=[f'lag_{i}' for i in range(1, max_lag+1)])
         yhat = model.predict(Xf)[0]
         preds.append(yhat)
         hist_vals.append(yhat)
@@ -161,7 +187,8 @@ while True:
     # Plot only recent actuals and forecast
     recent = live_df['value'].iloc[-max_lag:]
     times = live_df.index[-max_lag:]
-    future = [live_df.index[-1] + pd.Timedelta(seconds=i+1) for i in range(horizon)]
+    future = [live_df.index[-1] +
+              pd.Timedelta(seconds=i+1) for i in range(horizon)]
 
     ax.clear()
     ax.plot(times, recent, 'b-', label='Actual')
