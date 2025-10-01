@@ -1,2 +1,3 @@
 __pycache*
 .python-version
+logs.*
