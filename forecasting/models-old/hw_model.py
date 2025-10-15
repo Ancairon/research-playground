@@ -79,16 +79,13 @@ def getDataFromAPI(ip, context, dimension, seconds_back):
 def train_hw_model(series, trend='add', seasonal=None, seasonal_periods=None):
     """Train Holt-Winters model on the given series."""
     try:
+        # Avoid passing use_boxcox at fit-time; let ExponentialSmoothing decide internally
         model = ExponentialSmoothing(
-            series, 
-            trend=trend, 
-            seasonal=seasonal, 
-            seasonal_periods=seasonal_periods
-        ).fit(
-            optimized=True, 
-            use_boxcox=False,
-            remove_bias=False
-        )
+            series,
+            trend=trend,
+            seasonal=seasonal,
+            seasonal_periods=seasonal_periods,
+        ).fit(optimized=True, remove_bias=False)
         return model
     except (ValueError, TypeError) as e:
         print(f"Holt-Winters training failed: {e}, using simpler model")

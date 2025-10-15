@@ -44,6 +44,8 @@ parser.add_argument('--retrain_threshold', type=float, default=None,
                     help='Error threshold to trigger retrain')
 parser.add_argument('--max_errors',      type=int, default=1,
                     help='Errors to allow before retrain')
+parser.add_argument('--quiet',           action='store_true',
+                    help='Suppress all output for faster execution')
 args = parser.parse_args()
 
 if args.dimension is None:
@@ -91,7 +93,8 @@ def main(
         target_col="value",
         date_col="timestamp",
         retrain_threshold=5,
-        max_errors=1
+        max_errors=1,
+        quiet=False
 ):
     if csv:
         df = pd.read_csv(csv)
@@ -104,6 +107,8 @@ def main(
 
         window = min(window, len(df))
         feed_df = df[[target]].rename(columns={target: 'value'})
+        # Use consistent train_size slicing: initial training uses first train_size rows
+        train_size = int(window * (1 - test_size))
         feed_ptr = window
     else:
 
@@ -111,18 +116,26 @@ def main(
         df = df.rename(columns={'value': target_col})
 
     max_lag, horizon = max_lag, horizon
-    for lag in range(1, max_lag + horizon):
-        df[f'lag_{lag}'] = df[target_col].shift(lag)
-    df.dropna(inplace=True)
+    # Slice to the initial training window when CSV is provided
+    if csv:
+        df_train = feed_df.iloc[:train_size].copy()
+        df_for_feats = df_train.rename(columns={'value': target_col})
+    else:
+        df_for_feats = df.rename(columns={'value': target_col})
 
-    X_all = df[[f'lag_{i}' for i in range(1, max_lag+1)]]
-    y_all = df[target_col].shift(- (horizon - 1))
+    for lag in range(1, max_lag + horizon):
+        df_for_feats[f'lag_{lag}'] = df_for_feats[target_col].shift(lag)
+    df_for_feats.dropna(inplace=True)
+
+    X_all = df_for_feats[[f'lag_{i}' for i in range(1, max_lag+1)]]
+    y_all = df_for_feats[target_col].shift(- (horizon - 1))
     data = pd.concat([X_all, y_all.rename('target')], axis=1).dropna()
     X, y = data[[f'lag_{i}' for i in range(1, max_lag+1)]], data['target']
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, shuffle=False
-    )
+    # Keep the same chronological split behaviour (no shuffle)
+    split_idx = int(len(X) * (1 - test_size))
+    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
     model = ExtraTreesRegressor(
         n_estimators=n_estimators,
@@ -132,10 +145,13 @@ def main(
     start_train = time.time()
     model.fit(X_train, y_train)
     train_time = time.time() - start_train
-    print(f"Initial training time: {train_time:.3f}s")
+    if not quiet:
+        print(f"Initial training time: {train_time:.3f}s")
 
-    plt.ion()
-    fig, ax = plt.subplots()
+    # Initialize plotting only if not quiet
+    if not quiet:
+        plt.ion()
+        fig, ax = plt.subplots()
     errors = deque(maxlen=max_errors)
     prev_pred = None
     holdback = 0
@@ -143,11 +159,28 @@ def main(
     signed_errors = []
     y_true_list = []
     y_pred_list = []
+    
+    # Timing tracking
+    training_times = [train_time]  # Initial training time
+    inference_times = []
+    
+    # Progress tracking
+    iteration_count = 0
+    start_time = time.time()
+    progress_interval = 100 if quiet else 10  # Less frequent in quiet mode
 
     while True:
+        iteration_count += 1
+        
+        # Progress indicator
+        if quiet and iteration_count % progress_interval == 0:
+            elapsed = time.time() - start_time
+            print(f"ExtraTrees: {iteration_count} iterations, {elapsed:.1f}s elapsed")
+        
         if csv:
             if feed_ptr > len(feed_df):
-                print("End of simulation feed.")
+                if not quiet:
+                    print("End of simulation feed.")
                 break
             live_df = feed_df.iloc[:feed_ptr]
             feed_ptr += 1
@@ -166,14 +199,17 @@ def main(
             errors.append(err)
             if retrain_threshold is not None and len(errors) == errors.maxlen:
                 avg_err = np.mean(errors)
-                print("AVERAGE_ERROR", avg_err, holdback)
+                if not quiet:
+                    print("AVERAGE_ERROR", avg_err, holdback)
                 result_avg_err.append(avg_err)
                 if avg_err > retrain_threshold:
-                    print(f"\n\nRetraining model, avg err={avg_err:.4f}")
+                    if not quiet:
+                        print(f"\n\nRetraining model, avg err={avg_err:.4f}")
                     holdback += 1
                     if holdback == 5:
                         holdback = 0
-                        print("Major anomaly Holdback for 5 seconds before retrain")
+                        if not quiet:
+                            print("Major anomaly Holdback for 5 seconds before retrain")
                         time.sleep(5)
                     start_retrain = time.time()
                     df2 = live_df.copy()
@@ -189,11 +225,14 @@ def main(
                         data2['target']
                     )
                     retrain_time = time.time() - start_retrain
-                    print(f"Retraining time: {retrain_time:.3f}s\n")
+                    training_times.append(retrain_time)
+                    if not quiet:
+                        print(f"Retraining time: {retrain_time:.3f}s\n")
                     time.sleep(1)
                     errors.clear()
                 else:
-                    print("zeroing the holdback")
+                    if not quiet:
+                        print("zeroing the holdback")
                     holdback = 0
 
         start_inf = time.time()
@@ -208,30 +247,35 @@ def main(
             preds.append(yhat)
             hist_vals.append(yhat)
         inf_time = time.time() - start_inf
-        print(f"Inference time: {inf_time:.3f}s")
+        inference_times.append(inf_time)
+        if not quiet:
+            print(f"Inference time: {inf_time:.3f}s")
         prev_pred = preds[0] if preds else None
 
-        recent = live_df['value'].iloc[-max_lag:]
-        times = live_df.index[-max_lag:]
-        future = [
-            live_df.index[-1] + pd.Timedelta(seconds=i+1)
-            for i in range(horizon)
-        ]
+        # Plotting only if not quiet
+        if not quiet:
+            recent = live_df['value'].iloc[-max_lag:]
+            times = live_df.index[-max_lag:]
+            future = [
+                live_df.index[-1] + pd.Timedelta(seconds=i+1)
+                for i in range(horizon)
+            ]
 
-        ax.clear()
-        ax.plot(times,  recent, 'b-', label='Actual')
-        ax.plot(future, preds,   'r--o', label='Forecast')
-        ax.set_xlim(times[0], future[-1])
-        ax.set_ylim(0, 100)
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-        fig.autofmt_xdate()
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Value')
-        ax.legend()
-        fig.canvas.draw()
-        fig.canvas.flush_events()
-        time.sleep(1)
+            ax.clear()
+            ax.plot(times,  recent, 'b-', label='Actual')
+            ax.plot(future, preds,   'r--o', label='Forecast')
+            ax.set_xlim(times[0], future[-1])
+            ax.set_ylim(0, 100)
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            fig.autofmt_xdate()
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Value')
+            ax.legend()
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+            if not quiet:  # Only sleep in interactive mode
+                time.sleep(1)
 
     avg_mean = _safe_mean(result_avg_err)
     avg_max = _safe_max(result_avg_err)
@@ -249,9 +293,16 @@ def main(
         if len(y_true_arr) and np.sum(y_true_arr) != 0 else float('nan')
     )
 
-    print("AVERAGE", avg_mean, "MAX", avg_max, "MIN", avg_min)
-    print(f"P80 {p80}  P95 {p95}  P99 {p99}")
-    print(f"MBE {mbe}  PBIAS% {pbias}")
+    # Calculate average timing metrics
+    avg_training_time = _safe_mean(training_times)
+    avg_inference_time = _safe_mean(inference_times)
+
+    if not quiet:
+        print("AVERAGE", avg_mean, "MAX", avg_max, "MIN", avg_min)
+        print(f"P80 {p80}  P95 {p95}  P99 {p99}")
+        print(f"MBE {mbe}  PBIAS% {pbias}")
+        print(f"Avg Training Time: {avg_training_time:.3f}s")
+        print(f"Avg Inference Time: {avg_inference_time:.3f}s")
 
     return {
         "mean_avg_err": avg_mean,
@@ -261,7 +312,9 @@ def main(
         "p95_avg_err": p95,
         "p99_avg_err": p99,
         "mbe": mbe,
-        "pbias_pct": pbias
+        "pbias_pct": pbias,
+        "avg_training_time": avg_training_time,
+        "avg_inference_time": avg_inference_time
     }
 
 
@@ -280,5 +333,6 @@ if __name__ == '__main__':
         target_col=args.target_col,
         date_col=args.date_col,
         retrain_threshold=args.retrain_threshold,
-        max_errors=args.max_errors
+        max_errors=args.max_errors,
+        quiet=args.quiet
     )

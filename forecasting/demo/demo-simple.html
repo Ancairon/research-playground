@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Netdata Predictions Demo</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #0c0c0e;
+      color: #e1e1e1;
+    }
+    h1 { color: #00AB44; }
+    .container {
+      background: #1a1a1e;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin: 20px 0;
+    }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+    }
+    label {
+      font-size: 12px;
+      color: #999;
+      margin-bottom: 5px;
+      text-transform: uppercase;
+    }
+    select, input, button {
+      padding: 8px 12px;
+      background: #2a2a2e;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: #e1e1e1;
+      font-size: 14px;
+    }
+    button {
+      background: #00AB44;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { background: #008835; }
+    button:disabled {
+      background: #444;
+      cursor: not-allowed;
+    }
+    canvas {
+      width: 100% !important;
+      height: 400px !important;
+    }
+    .status {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .status.info { background: #1a4d7a; border-left: 4px solid #2196F3; }
+    .status.error { background: #7a1a1a; border-left: 4px solid #f44336; }
+    .status.success { background: #1a5a1a; border-left: 4px solid #00AB44; }
+    code {
+      background: #2a2a2e;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: monospace;
+    }
+    .legend {
+      margin-top: 15px;
+      padding: 10px;
+      background: #2a2a2e;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .legend-item {
+      display: inline-block;
+      margin-right: 20px;
+    }
+    .legend-box {
+      display: inline-block;
+      width: 20px;
+      height: 3px;
+      margin-right: 5px;
+      vertical-align: middle;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h1>📈 Netdata Chart Predictions Demo</h1>
+  
+  <div class="container">
+    <h2>Fetch Real Data + Add Predictions</h2>
+    <p>This demo fetches real chart data from a running Netdata instance, then adds prediction values to the right.</p>
+    
+    <div class="controls">
+      <div class="control-group">
+        <label for="netdataUrl">Netdata URL</label>
+        <input type="text" id="netdataUrl" value="http://localhost:19999" placeholder="http://localhost:19999">
+      </div>
+      
+      <div class="control-group">
+        <label for="chartId">Chart ID</label>
+        <input type="text" id="chartId" value="system.cpu" placeholder="system.cpu">
+      </div>
+      
+      <div class="control-group">
+        <label for="predictionMode">Prediction Mode</label>
+        <select id="predictionMode">
+          <option value="last-value">Last Value</option>
+          <option value="linear">Linear Trend</option>
+          <option value="constant">Constant</option>
+        </select>
+      </div>
+      
+      <div class="control-group">
+        <label for="horizonSeconds">Horizon (seconds)</label>
+        <input type="number" id="horizonSeconds" value="300" min="60" max="3600" step="60">
+      </div>
+      
+      <div class="control-group">
+        <label for="linearSlope">Linear Slope</label>
+        <input type="number" id="linearSlope" value="0.1" step="0.05">
+      </div>
+      
+      <div class="control-group" style="align-self: end;">
+        <button id="fetchBtn" onclick="fetchAndRender()">Fetch & Render</button>
+      </div>
+    </div>
+    
+    <div id="status"></div>
+    
+    <div style="background: #0c0c0e; border-radius: 4px; padding: 15px; margin-top: 20px;">
+      <canvas id="chart"></canvas>
+    </div>
+    
+    <div class="legend">
+      <div class="legend-item">
+        <span class="legend-box" style="background: #00AB44;"></span>
+        Historical Data
+      </div>
+      <div class="legend-item">
+        <span class="legend-box" style="background: #FFC107; border-top: 3px dashed #FFC107;"></span>
+        Predictions
+      </div>
+    </div>
+  </div>
+  
+  <div class="container">
+    <h3>Instructions</h3>
+    <ol>
+      <li>Make sure Netdata is running: <code>sudo systemctl start netdata</code></li>
+      <li>Verify it's accessible at <code>http://localhost:19999</code></li>
+      <li>Click "Fetch & Render" to load real data and add predictions</li>
+      <li>Try different charts: <code>system.ram</code>, <code>system.load</code>, <code>system.io</code>, etc.</li>
+    </ol>
+    
+    <h3>Common Chart IDs</h3>
+    <ul>
+      <li><code>system.cpu</code> - CPU usage</li>
+      <li><code>system.ram</code> - RAM usage</li>
+      <li><code>system.load</code> - System load</li>
+      <li><code>system.io</code> - Disk I/O</li>
+      <li><code>system.net</code> - Network traffic</li>
+    </ul>
+  </div>
+
+  <script>
+    let chart = null;
+    
+    function showStatus(message, type = 'info') {
+      const status = document.getElementById('status');
+      status.className = `status ${type}`;
+      status.textContent = message;
+    }
+    
+    function generatePredictions(lastValue, count, step, mode, slope = 0.1) {
+      const predictions = [];
+      
+      for (let i = 1; i <= count; i++) {
+        let value;
+        switch(mode) {
+          case 'linear':
+            value = lastValue + (slope * step * i);
+            break;
+          case 'constant':
+            value = 50; // Fixed value
+            break;
+          case 'last-value':
+          default:
+            value = lastValue;
+            break;
+        }
+        predictions.push(value);
+      }
+      
+      return predictions;
+    }
+    
+    async function fetchAndRender() {
+      const btn = document.getElementById('fetchBtn');
+      btn.disabled = true;
+      btn.textContent = 'Fetching...';
+      
+      try {
+        const netdataUrl = document.getElementById('netdataUrl').value;
+        const chartId = document.getElementById('chartId').value;
+        const mode = document.getElementById('predictionMode').value;
+        const horizon = parseInt(document.getElementById('horizonSeconds').value);
+        const slope = parseFloat(document.getElementById('linearSlope').value);
+        
+        showStatus(`Fetching chart data: ${chartId}...`, 'info');
+        
+        // Fetch last 10 minutes of data
+        const params = new URLSearchParams({
+          chart: chartId,
+          format: 'json',
+          points: 600,
+          group: 'average',
+          gtime: 0,
+          options: 'absolute|jsonwrap|nonzero',
+          after: -600 // last 10 minutes
+        });
+        
+        const url = `${netdataUrl}/api/v1/data?${params}`;
+        console.log('Fetching:', url);
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        console.log('Received data:', data);
+        
+        if (!data || !data.result || !data.result.data) {
+          throw new Error('Invalid data structure received');
+        }
+        
+        const result = data.result;
+        const timestamps = result.data[0];
+        const dimensionData = result.data.slice(1);
+        const dimensionNames = result.dimension_names || [];
+        
+        if (!timestamps || timestamps.length === 0) {
+          throw new Error('No data points received');
+        }
+        
+        showStatus(`Received ${timestamps.length} data points. Generating predictions...`, 'success');
+        
+        // Compute predictions
+        const step = result.view_update_every || 1;
+        const predictionCount = Math.ceil(horizon / step);
+        
+        // Generate future timestamps
+        const lastTimestamp = timestamps[timestamps.length - 1];
+        const futureTimestamps = [];
+        for (let i = 1; i <= predictionCount; i++) {
+          futureTimestamps.push(lastTimestamp + (step * i));
+        }
+        
+        // Format all timestamps
+        const formatTime = (ts) => {
+          const date = new Date(ts * 1000);
+          return date.toLocaleTimeString('en-US', { 
+            hour: '2-digit', 
+            minute: '2-digit',
+            second: '2-digit'
+          });
+        };
+        
+        const allTimestamps = timestamps.concat(futureTimestamps);
+        const allLabels = allTimestamps.map(formatTime);
+        
+        // Prepare datasets for each dimension
+        const datasets = [];
+        const colors = [
+          '#00AB44', '#2196F3', '#FFC107', '#F44336', 
+          '#9C27B0', '#00BCD4', '#FF9800', '#E91E63'
+        ];
+        
+        dimensionData.forEach((dimValues, idx) => {
+          const dimName = dimensionNames[idx] || `dim${idx}`;
+          
+          // Find last non-null value
+          let lastValue = null;
+          for (let i = dimValues.length - 1; i >= 0; i--) {
+            if (dimValues[i] !== null && dimValues[i] !== undefined) {
+              lastValue = dimValues[i];
+              break;
+            }
+          }
+          
+          if (lastValue === null) lastValue = 0;
+          
+          // Generate predictions for this dimension
+          const predictions = generatePredictions(lastValue, predictionCount, step, mode, slope);
+          
+          // Historical data (pad with nulls for predictions)
+          const historicalData = dimValues.concat(new Array(predictionCount).fill(null));
+          
+          // Prediction data (nulls for historical, predictions for future)
+          const predictionData = new Array(dimValues.length).fill(null).concat(predictions);
+          
+          const color = colors[idx % colors.length];
+          
+          // Add historical dataset
+          datasets.push({
+            label: dimName,
+            data: historicalData,
+            borderColor: color,
+            backgroundColor: color + '20',
+            borderWidth: 2,
+            fill: false,
+            tension: 0.4,
+            pointRadius: 0,
+            pointHoverRadius: 4
+          });
+          
+          // Add prediction dataset
+          datasets.push({
+            label: `${dimName} (predicted)`,
+            data: predictionData,
+            borderColor: color,
+            backgroundColor: color + '10',
+            borderWidth: 2,
+            borderDash: [5, 5],
+            fill: false,
+            tension: 0.4,
+            pointRadius: 0,
+            pointHoverRadius: 4
+          });
+        });
+        
+        // Render chart
+        const ctx = document.getElementById('chart').getContext('2d');
+        
+        if (chart) {
+          chart.destroy();
+        }
+        
+        chart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: allLabels,
+            datasets: datasets
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+              mode: 'index',
+              intersect: false
+            },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'top',
+                labels: {
+                  color: '#e1e1e1',
+                  usePointStyle: true,
+                  padding: 15,
+                  font: { size: 11 }
+                }
+              },
+              tooltip: {
+                backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                titleColor: '#fff',
+                bodyColor: '#fff',
+                borderColor: '#444',
+                borderWidth: 1
+              }
+            },
+            scales: {
+              x: {
+                grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                ticks: { 
+                  color: '#999',
+                  maxTicksLimit: 15
+                }
+              },
+              y: {
+                grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                ticks: { color: '#999' }
+              }
+            }
+          }
+        });
+        
+        showStatus(`✓ Chart rendered with ${predictionCount} prediction points (${horizon}s ahead)`, 'success');
+        
+      } catch (error) {
+        console.error('Error:', error);
+        showStatus(`Error: ${error.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Fetch & Render';
+      }
+    }
+    
+    // Auto-fetch on load if localhost:19999 is likely running
+    window.addEventListener('load', () => {
+      showStatus('Ready. Click "Fetch & Render" to load chart data.', 'info');
+    });
+  </script>
+</body>
+</html>
