@@ -32,18 +32,16 @@ class XGBoostModel(BaseTimeSeriesModel):
     Supports online learning through PyCaret's update mechanism.
     """
     
-    def __init__(self, horizon: int = 5, random_state: int = 42, seasonal_period: int = 60, **kwargs):
+    def __init__(self, horizon: int = 5, random_state: int = 42, **kwargs):
         """
         Initialize XGBoost model.
         
         Args:
             horizon: Forecast horizon (steps ahead)
             random_state: Random seed
-            seasonal_period: Seasonal period for feature engineering
             **kwargs: Additional PyCaret setup parameters
         """
         super().__init__(horizon, random_state)
-        self.seasonal_period = seasonal_period
         self.exp = None
         self.pipeline = None
         self.setup_kwargs = kwargs
@@ -62,7 +60,6 @@ class XGBoostModel(BaseTimeSeriesModel):
             self.exp.setup(
                 data=y,
                 fh=self.horizon,
-                seasonal_period=self.seasonal_period,
                 session_id=self.random_state,
                 numeric_imputation_target="ffill",
                 **self.setup_kwargs
@@ -100,7 +97,6 @@ class XGBoostModel(BaseTimeSeriesModel):
     def get_model_params(self) -> Dict[str, Any]:
         return {
             "horizon": self.horizon,
-            "seasonal_period": self.seasonal_period,
             "random_state": self.random_state,
             "online_learning": True
         }

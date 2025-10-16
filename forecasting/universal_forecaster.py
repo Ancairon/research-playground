@@ -69,7 +69,8 @@ class UniversalForecaster:
     def __init__(
         self,
         model: BaseTimeSeriesModel,
-        window: int = 300,
+        window: int = 30,
+        train_window: int = 300,
         prediction_smoothing: int = 3,
         dynamic_retrain: bool = True,
         retrain_scale: float = 3.0,
@@ -85,7 +86,8 @@ class UniversalForecaster:
         
         Args:
             model: Forecasting model (must implement BaseTimeSeriesModel)
-            window: Training window size (historical points)
+            window: Inference window size (historical points for predictions)
+            train_window: Initial training window size (defaults to window if None)
             prediction_smoothing: Number of predictions to average (1=no smoothing)
             dynamic_retrain: Enable dynamic threshold-based retraining
             retrain_scale: Multiplier for MAD/std threshold calculation
@@ -98,6 +100,7 @@ class UniversalForecaster:
         """
         self.model = model
         self.window = window
+        self.train_window = train_window if train_window is not None else window
         self.prediction_smoothing = prediction_smoothing
         self.dynamic_retrain = dynamic_retrain
         self.retrain_scale = retrain_scale

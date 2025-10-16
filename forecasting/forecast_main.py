@@ -61,11 +61,11 @@ def main():
     
     # Model parameters
     parser.add_argument('--horizon', type=int, default=5, help='Forecast horizon (steps ahead)')
-    parser.add_argument('--window', type=int, default=300, help='Training window size')
+    parser.add_argument('--window', type=int, default=300, help='Inference window size (for predictions)')
+    parser.add_argument('--train-window', type=int, default=None, help='Initial training window size (defaults to --window)')
     parser.add_argument('--random-state', type=int, default=42, help='Random seed')
     
     # Model-specific parameters
-    parser.add_argument('--seasonal-period', type=int, default=60, help='[XGBoost] Seasonal period')
     parser.add_argument('--custom-seasonality', type=str, help='[Prophet] Custom seasonality (format: name:period:fourier_order)')
     parser.add_argument('--lookback', type=int, default=60, help='[LSTM] Lookback window')
     parser.add_argument('--hidden-size', type=int, default=64, help='[LSTM] Hidden layer size')
@@ -77,7 +77,7 @@ def main():
     
     # Retraining parameters
     parser.add_argument('--retrain-scale', type=float, default=3.0, help='MAD multiplier for threshold')
-    parser.add_argument('--retrain-min', type=float, default=50.0, help='Minimum retrain threshold (%)')
+    parser.add_argument('--retrain-min', type=float, default=50.0, help='Minimum retrain threshold (%%)')
     parser.add_argument('--retrain-consec', type=int, default=2, help='Consecutive violations to retrain')
     parser.add_argument('--retrain-cooldown', type=int, default=5, help='Min steps between retrains')
     parser.add_argument('--no-mad', action='store_true', help='Use std instead of MAD')
@@ -94,11 +94,13 @@ def main():
     
     # Print model info
     if not args.quiet:
+        train_window = args.train_window if args.train_window is not None else args.window
         model_info = get_model_info(args.model)
         print(f"\n{'='*70}")
         print(f"Universal Time Series Forecaster")
         print(f"Model: {model_info['class']}")
         print(f"{model_info['description']}")
+        print(f"Train Window: {train_window}s | Inference Window: {args.window}s")
         print(f"{'='*70}\n")
     
     # Create model with appropriate parameters
@@ -107,9 +109,7 @@ def main():
         'random_state': args.random_state
     }
     
-    if args.model == 'xgboost':
-        model_kwargs['seasonal_period'] = args.seasonal_period
-    elif args.model == 'prophet':
+    if args.model == 'prophet':
         model_kwargs['seasonality_mode'] = 'additive'
         if args.custom_seasonality:
             # Parse format: name:period:fourier_order
@@ -127,10 +127,14 @@ def main():
     
     model = create_model(args.model, **model_kwargs)
     
+    # Determine training window (use train_window if specified, otherwise window)
+    train_window = args.train_window if args.train_window is not None else args.window
+    
     # Create universal forecaster
     forecaster = UniversalForecaster(
         model=model,
         window=args.window,
+        train_window=train_window,
         prediction_smoothing=args.prediction_smoothing,
         retrain_scale=args.retrain_scale,
         retrain_min=args.retrain_min,
@@ -149,11 +153,11 @@ def main():
         else:
             df_csv['timestamp'] = pd.to_datetime(df_csv['timestamp'])
         df_csv.set_index('timestamp', inplace=True)
-        init_df = df_csv['value'].iloc[:args.window]
+        init_df = df_csv['value'].iloc[:train_window]
         feed_df = df_csv['value']
-        feed_ptr = args.window
+        feed_ptr = train_window
     else:
-        init_df = get_data_from_api(args.ip, args.context, args.dimension, args.window)['value']
+        init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
         feed_df = None
         feed_ptr = None
     

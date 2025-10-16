@@ -16,18 +16,183 @@ def generate_traffic_pattern(t, pattern='daily'):
     """
     Generate traffic value based on time and pattern.
     Returns bandwidth in KB/s
-    Fast cycles for testing (patterns visible within seconds/minutes)
+    
+    These patterns simulate REAL production traffic scenarios with 
+    predictable structure that forecasting models should learn.
     """
-    if pattern == 'daily':
-        # Smooth sine wave: 30 second cycle (2 full cycles per minute)
-        # Good for testing smoothing and prediction stability
-        base = 100 + 80 * math.sin(t * 2 * math.pi / 30)  # 30s period
-        noise = random.gauss(0, 8)  # Low noise for smooth predictions
+    if pattern == 'web_server':
+        # Realistic web server: baseline + periodic request bursts
+        # 60s cycle with regular traffic spikes every 15s (page loads)
+        cycle_15s = t % 15
+        
+        # Baseline traffic (background requests)
+        base = 80 + 20 * math.sin(t * 2 * math.pi / 60)
+        
+        # Regular page load bursts every 15 seconds
+        if cycle_15s < 3:  # 3-second burst for page load + assets
+            burst = 150 * math.exp(-cycle_15s / 1.5)  # Exponential decay
+            base += burst
+        
+        noise = random.gauss(0, 8)
+        return max(10, base + noise)
+    
+    elif pattern == 'api_service':
+        # RESTful API: regular polling + scheduled jobs
+        # Clients poll every 10s, batch jobs every 30s
+        
+        # Baseline API polling (every 10s)
+        cycle_10s = t % 10
+        if cycle_10s < 1.5:
+            base = 180 + 40 * random.random()  # API response burst
+        else:
+            base = 60 + 10 * math.sin(t * 2 * math.pi / 10)
+        
+        # Scheduled batch job every 30s (heavier load)
+        cycle_30s = t % 30
+        if 28 < cycle_30s < 30:
+            base += 200  # Batch processing spike
+        
+        noise = random.gauss(0, 12)
+        return max(10, base + noise)
+    
+    elif pattern == 'database_backup':
+        # Database: continuous queries + periodic backups
+        # Light queries + heavy backup every 45s
+        cycle_45s = t % 45
+        
+        # Continuous query traffic
+        base = 100 + 30 * math.sin(t * 2 * math.pi / 5)
+        
+        # Backup window: 10s of heavy I/O every 45s
+        if cycle_45s < 10:
+            backup_load = 250 * (1 - cycle_45s / 10)  # Decreasing load
+            base += backup_load
+        
+        noise = random.gauss(0, 10)
+        return max(10, base + noise)
+    
+    elif pattern == 'cdn_cache':
+        # CDN cache: cache hits (low) + cache misses (high)
+        # 20s cycle: mostly cached, periodic cache refreshes
+        cycle_20s = t % 20
+        
+        if cycle_20s < 2:
+            # Cache miss/refresh burst
+            base = 300 + 50 * random.random()
+        else:
+            # Cached content (low bandwidth)
+            base = 40 + 20 * math.sin(t * 2 * math.pi / 20)
+        
+        noise = random.gauss(0, 8)
+        return max(10, base + noise)
+    
+    elif pattern == 'microservices':
+        # Microservices mesh: service-to-service calls
+        # Multiple services communicating on different schedules
+        
+        # Service A: every 8s
+        cycle_8s = t % 8
+        if cycle_8s < 1:
+            traffic_a = 120
+        else:
+            traffic_a = 30
+        
+        # Service B: every 12s
+        cycle_12s = t % 12
+        if cycle_12s < 1.5:
+            traffic_b = 100
+        else:
+            traffic_b = 25
+        
+        # Service C: every 6s (health checks)
+        cycle_6s = t % 6
+        if cycle_6s < 0.5:
+            traffic_c = 60
+        else:
+            traffic_c = 15
+        
+        base = traffic_a + traffic_b + traffic_c
+        noise = random.gauss(0, 10)
+        return max(10, base + noise)
+    
+    elif pattern == 'streaming_video':
+        # Video streaming: chunk downloads every 2-4s
+        # Adaptive bitrate with buffer management
+        cycle_3s = t % 3
+        
+        if cycle_3s < 0.8:
+            # Video chunk download
+            base = 400 + 100 * random.random()
+        else:
+            # Buffer processing/idle
+            base = 50 + 20 * math.sin(t * 2 * math.pi / 3)
+        
+        noise = random.gauss(0, 15)
+        return max(10, base + noise)
+    
+    elif pattern == 'iot_sensors':
+        # IoT sensors: synchronized reporting intervals
+        # All sensors report every 15s, staggered by 5s
+        
+        total = 0
+        # Sensor batch 1: every 15s at t=0
+        if (t % 15) < 1:
+            total += 120
+        
+        # Sensor batch 2: every 15s at t=5
+        if ((t - 5) % 15) < 1:
+            total += 100
+        
+        # Sensor batch 3: every 15s at t=10
+        if ((t - 10) % 15) < 1:
+            total += 110
+        
+        # Baseline telemetry
+        total += 40 + 10 * math.sin(t * 2 * math.pi / 15)
+        
+        noise = random.gauss(0, 8)
+        return max(10, total + noise)
+    
+    elif pattern == 'message_queue':
+        # Message queue: batched processing
+        # Messages accumulate, then batch processed
+        cycle_20s = t % 20
+        
+        if 15 < cycle_20s < 18:
+            # Batch processing window (3s)
+            base = 350 - 50 * (cycle_20s - 15)  # Decreasing as queue drains
+        else:
+            # Message accumulation (low traffic)
+            base = 60 + 15 * (cycle_20s / 20) * 100
+        
+        noise = random.gauss(0, 12)
+        return max(10, base + noise)
+    
+    elif pattern == 'monitoring_system':
+        # Monitoring/metrics: regular scrapes
+        # Multiple exporters scraped at different intervals
+        
+        # Fast metrics (every 5s)
+        cycle_5s = t % 5
+        if cycle_5s < 0.5:
+            fast_metrics = 80
+        else:
+            fast_metrics = 20
+        
+        # Slow metrics (every 30s)
+        cycle_30s = t % 30
+        if cycle_30s < 2:
+            slow_metrics = 200
+        else:
+            slow_metrics = 30
+        
+        base = fast_metrics + slow_metrics
+        noise = random.gauss(0, 8)
         return max(10, base + noise)
     
     elif pattern == 'business_hours':
+        # Legacy pattern kept for compatibility
         # Step pattern: 20s high, 10s low (repeats every 30s)
-        # Tests model's ability to predict step changes
         second = t % 30
         if second < 20:
             base = 150 + 20 * math.sin(second * math.pi / 10)
@@ -37,47 +202,10 @@ def generate_traffic_pattern(t, pattern='daily'):
         noise = random.gauss(0, 10)
         return max(10, base + noise)
     
-    elif pattern == 'spiky':
-        # Sharp spikes every 15 seconds
-        # Tests retraining on sudden changes and prediction smoothing
-        second = t % 15
-        if second < 2:  # 2-second spike every 15s
-            base = 250 + 50 * random.random()
-        else:
-            base = 50 + 15 * math.sin(t * 2 * math.pi / 15)
-        
-        noise = random.gauss(0, 10)
-        return max(10, base + noise)
-    
-    elif pattern == 'sawtooth':
-        # Linear ramp up, sharp drop (20 second cycle)
-        # Tests model's ability to track trends and predict drops
-        cycle = (t % 20) / 20  # Position in 20s cycle
-        if cycle < 0.75:  # Ramp up for 15 seconds
-            base = 50 + 120 * (cycle / 0.75)
-        else:  # Sharp drop for 5 seconds
-            base = 50 + 20 * (1 - (cycle - 0.75) / 0.25)
-        
-        noise = random.gauss(0, 8)
-        return max(10, base + noise)
-    
-    elif pattern == 'trend':
-        # Upward trend with cyclical component (60 second cycle, then reset)
-        # Tests model retraining as baseline shifts
-        second_of_minute = t % 60
-        base = 60 + (second_of_minute) * 2  # Increases 2 KB/s per second
-        
-        # Add 10-second cycle on top of trend
-        cycle = 25 * math.sin(t * 2 * math.pi / 10)
-        
-        noise = random.gauss(0, 12)
-        return max(10, base + cycle + noise)
-    
     else:  # 'sine' or default
-        # Fast sine wave: 20 second period (3 cycles per minute)
-        # Clean predictable pattern for baseline testing
+        # Baseline smooth pattern for testing
         base = 100 + 60 * math.sin(t * 2 * math.pi / 20)
-        noise = random.gauss(0, 5)  # Very low noise
+        noise = random.gauss(0, 5)
         return max(10, base + noise)
 
 
@@ -169,8 +297,10 @@ def main():
     
     parser.add_argument(
         '--pattern',
-        choices=['daily', 'business_hours', 'spiky', 'sawtooth', 'trend', 'sine'],
-        default='daily',
+        choices=['web_server', 'api_service', 'database_backup', 'cdn_cache', 
+                 'microservices', 'streaming_video', 'iot_sensors', 'message_queue',
+                 'monitoring_system', 'business_hours', 'sine'],
+        default='web_server',
         help='Traffic pattern to simulate'
     )
     
@@ -198,29 +328,59 @@ def main():
     
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
-║    Network Traffic Simulator (Fast Patterns)            ║
+║   Network Traffic Simulator (Production Patterns)       ║
 ╚══════════════════════════════════════════════════════════╝
 
-Pattern Descriptions (fast cycles for testing):
-  daily          - Smooth sine: 30s cycle (2 per min) | Low noise
-                   Range: 20-180 KB/s | Good for: smoothing tests
+=== APPLICATION PATTERNS ===
+  web_server      - HTTP server with regular page loads
+                    60s cycle, bursts every 15s (3s duration)
+                    Range: 60-250 KB/s | Like: nginx, Apache
   
-  business_hours - Step pattern: 20s high, 10s low (30s cycle)
-                   Range: 40-170 KB/s | Good for: step change prediction
+  api_service     - RESTful API with polling + scheduled jobs
+                    10s polling + 30s batch jobs
+                    Range: 60-380 KB/s | Like: microservice API
   
-  spiky          - Sharp spikes every 15s (2s duration)
-                   Range: 50-300 KB/s | Good for: retraining triggers
-  
-  sawtooth       - Linear ramp: 15s up, 5s drop (20s cycle)
-                   Range: 50-170 KB/s | Good for: trend tracking
-  
-  trend          - Upward trend + 10s sine (resets every 60s)
-                   Range: 60-200+ KB/s | Good for: model retraining
-  
-  sine           - Fast clean sine: 20s period (3 per min)
-                   Range: 40-160 KB/s | Good for: baseline testing
+  database_backup - DB queries + periodic backups
+                    Continuous queries + 10s backup every 45s
+                    Range: 70-350 KB/s | Like: PostgreSQL, MySQL
 
-All patterns optimized for 1-5 minute testing runs.
+=== INFRASTRUCTURE PATTERNS ===
+  cdn_cache       - CDN with cache hits/misses
+                    20s cycle: 2s cache refresh bursts
+                    Range: 40-350 KB/s | Like: Cloudflare, Akamai
+  
+  microservices   - Service mesh communication
+                    Multiple services (6s, 8s, 12s intervals)
+                    Range: 70-280 KB/s | Like: Kubernetes services
+  
+  message_queue   - Queue with batched processing
+                    Messages accumulate, batch process every 20s
+                    Range: 60-350 KB/s | Like: RabbitMQ, Kafka
+
+=== STREAMING & IOT PATTERNS ===
+  streaming_video - Video chunk downloads
+                    3s cycle: 0.8s chunk downloads
+                    Range: 50-500 KB/s | Like: HLS, DASH streaming
+  
+  iot_sensors     - Synchronized sensor reporting
+                    3 batches every 15s (staggered by 5s)
+                    Range: 40-370 KB/s | Like: industrial IoT
+  
+  monitoring_system - Metrics collection
+                     5s fast metrics + 30s slow metrics
+                     Range: 50-300 KB/s | Like: Prometheus scraping
+
+=== BASELINE PATTERNS ===
+  business_hours  - Step pattern (legacy compatibility)
+                    20s high, 10s low (30s cycle)
+                    Range: 40-170 KB/s
+  
+  sine            - Smooth sine wave (baseline testing)
+                    20s period, low noise
+                    Range: 40-160 KB/s
+
+All patterns simulate REAL production workloads with predictable structure.
+Models should learn these patterns for accurate forecasting.
 Press Ctrl+C to stop
 """)
     

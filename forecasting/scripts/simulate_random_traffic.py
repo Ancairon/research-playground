@@ -101,6 +101,52 @@ def simulate_random_traffic(duration=3600, interval=1, mode='chaotic', verbose=T
                 # Pure uniform random
                 target_kbps = random.uniform(10, 300)
                 last_value = target_kbps
+            
+            elif mode == 'random_burst':
+                # Random bursts with variable intervals (Poisson-like)
+                # Tests model robustness to unpredictable spikes
+                int_t = int(elapsed)
+                random.seed(int_t // 5)  # Change seed every 5 seconds
+                
+                if random.random() < 0.25:  # 25% chance of burst each 5s window
+                    target_kbps = 200 + 150 * random.random()
+                else:
+                    import math
+                    target_kbps = 60 + 20 * math.sin(elapsed * 2 * math.pi / 20)
+                
+                target_kbps += random.gauss(0, 15)
+            
+            elif mode == 'irregular_burst':
+                # Bursts at irregular intervals (prime number timing)
+                # Very challenging - no obvious pattern
+                import math
+                second = int(elapsed) % 30
+                # Bursts at: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29 (primes < 30)
+                primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
+                
+                if second in primes:
+                    target_kbps = 250 + 80 * random.random()
+                else:
+                    target_kbps = 50 + 15 * math.sin(elapsed * 2 * math.pi / 30)
+                
+                target_kbps += random.gauss(0, 12)
+            
+            elif mode == 'thunderstorm':
+                # Multiple random bursts clustered together (like storm)
+                # Burst cluster every 20s, with 3-5 random spikes within 6s window
+                import math
+                cycle_pos = elapsed % 20
+                
+                if cycle_pos < 6:  # 6-second storm window
+                    # Random spikes within storm
+                    if int(elapsed * 2) % 3 == 0:  # ~33% chance per half-second
+                        target_kbps = 270 + 80 * random.random()
+                    else:
+                        target_kbps = 120 + 40 * random.random()
+                else:
+                    target_kbps = 40 + 15 * math.sin(elapsed * 2 * math.pi / 20)
+                
+                target_kbps += random.gauss(0, 15)
                 
             else:  # 'white_noise'
                 # Gaussian white noise around mean
@@ -151,7 +197,8 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['chaotic', 'jumpy', 'noisy', 'uniform', 'white_noise'],
+        choices=['chaotic', 'jumpy', 'noisy', 'uniform', 'white_noise',
+                 'random_burst', 'irregular_burst', 'thunderstorm'],
         default='chaotic',
         help='Type of randomness'
     )
@@ -183,15 +230,35 @@ def main():
 ║    Network Traffic Simulator (Random/Unpatterned)       ║
 ╚══════════════════════════════════════════════════════════╝
 
-Randomness Modes:
+=== PURE RANDOM MODES ===
   chaotic     - Random walk with occasional jumps (default)
+                Range: 5-500 KB/s | 15%% jump probability
+  
   jumpy       - Frequent random level changes
+                Range: 20-300 KB/s | 30%% jump probability
+  
   noisy       - High variance random walk
+                Range: 10-400 KB/s | High noise (σ=50)
+  
   uniform     - Uniformly distributed random values
+                Range: 10-300 KB/s | Completely random
+  
   white_noise - Gaussian noise around mean
+                Mean: 150 KB/s | Std: 80 KB/s
 
-⚠️  This traffic has NO predictable pattern
-   Use for testing forecasting model limitations
+=== UNPREDICTABLE BURST MODES ===
+  random_burst    - Random bursts (25%% chance per 5s window)
+                    Range: 60-350 KB/s | Poisson-like timing
+  
+  irregular_burst - Bursts at prime intervals (2,3,5,7,11,13...s)
+                    Range: 50-330 KB/s | No periodic pattern
+  
+  thunderstorm    - Random burst clusters (3-5 spikes in 6s every 20s)
+                    Range: 40-350 KB/s | Unpredictable storm pattern
+
+⚠️  These patterns have NO predictable structure!
+   Use for testing forecasting model robustness and limitations.
+   For predictable patterns, use simulate_network_traffic.py
 
 Press Ctrl+C to stop
 """)

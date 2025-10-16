@@ -77,10 +77,11 @@ python3 forecast_main.py --model lstm --lookback 120 --epochs 100
 ```bash
 python3 forecast_main.py \
   --model xgboost \
-  --seasonal-period 60 \
   --window 300 \
+  --train-window 600 \
   --prediction-smoothing 5
 ```
+**Note**: `--train-window 600` trains on 600s (40 cycles), `--window 300` uses 300s for inference (faster predictions)
 
 ### Prophet
 ```bash
