@@ -7,6 +7,7 @@ Creates unpredictable traffic with no discernible pattern.
 import argparse
 import time
 import random
+import math
 import subprocess
 import signal
 import sys
@@ -76,13 +77,35 @@ def simulate_random_traffic(duration=3600, interval=1, mode='chaotic', verbose=T
             
             # Generate traffic level based on mode
             if mode == 'chaotic':
-                # Random walk with jumps
-                change = random.gauss(0, 30)
+                # Truly chaotic: multiple random components with no memory
+                # Mix random walk, jumps, oscillations with different periods, and pure noise
+                
+                # Component 1: Aggressive random walk (large steps)
+                change = random.gauss(0, 50)  # Increased from 30
                 last_value += change
-                if random.random() < 0.15:  # 15% chance of jump
-                    last_value = random.uniform(10, 400)
+                
+                # Component 2: Very frequent random jumps (break autocorrelation)
+                if random.random() < 0.25:  # 25% chance (increased from 15%)
+                    last_value = random.uniform(5, 450)
+                
+                # Component 3: Random oscillation with random period
+                random_freq = random.uniform(0.05, 0.5)  # Random frequency each step
+                oscillation = 40 * random.random() * math.sin(elapsed * random_freq * 2 * math.pi)
+                
+                # Component 4: Sudden spikes/drops (simulate network chaos)
+                if random.random() < 0.1:  # 10% chance
+                    spike = random.choice([-150, 150, -100, 100, -200, 200])
+                    last_value += spike
+                
+                # Component 5: Add heavy noise
+                noise = random.gauss(0, 35)  # Increased from 20
+                
+                # Component 6: Rare extreme events
+                if random.random() < 0.05:  # 5% chance
+                    last_value = random.choice([500, 5, random.uniform(300, 500)])
+                
                 last_value = max(5, min(500, last_value))
-                target_kbps = last_value + random.gauss(0, 20)
+                target_kbps = last_value + oscillation + noise
                 
             elif mode == 'jumpy':
                 # Frequent random jumps
@@ -111,7 +134,6 @@ def simulate_random_traffic(duration=3600, interval=1, mode='chaotic', verbose=T
                 if random.random() < 0.25:  # 25% chance of burst each 5s window
                     target_kbps = 200 + 150 * random.random()
                 else:
-                    import math
                     target_kbps = 60 + 20 * math.sin(elapsed * 2 * math.pi / 20)
                 
                 target_kbps += random.gauss(0, 15)
@@ -119,7 +141,6 @@ def simulate_random_traffic(duration=3600, interval=1, mode='chaotic', verbose=T
             elif mode == 'irregular_burst':
                 # Bursts at irregular intervals (prime number timing)
                 # Very challenging - no obvious pattern
-                import math
                 second = int(elapsed) % 30
                 # Bursts at: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29 (primes < 30)
                 primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
@@ -134,7 +155,6 @@ def simulate_random_traffic(duration=3600, interval=1, mode='chaotic', verbose=T
             elif mode == 'thunderstorm':
                 # Multiple random bursts clustered together (like storm)
                 # Burst cluster every 20s, with 3-5 random spikes within 6s window
-                import math
                 cycle_pos = elapsed % 20
                 
                 if cycle_pos < 6:  # 6-second storm window

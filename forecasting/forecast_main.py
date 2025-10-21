@@ -61,26 +61,28 @@ def main():
     
     # Model parameters
     parser.add_argument('--horizon', type=int, default=5, help='Forecast horizon (steps ahead)')
-    parser.add_argument('--window', type=int, default=300, help='Inference window size (for predictions)')
-    parser.add_argument('--train-window', type=int, default=None, help='Initial training window size (defaults to --window)')
+    parser.add_argument('--window', type=int, default=25, help='Inference window size (for predictions)')
+    parser.add_argument('--train-window', type=int, default=500, help='Initial training window size (defaults to --window)')
     parser.add_argument('--random-state', type=int, default=42, help='Random seed')
     
-    # Model-specific parameters
-    parser.add_argument('--custom-seasonality', type=str, help='[Prophet] Custom seasonality (format: name:period:fourier_order)')
-    parser.add_argument('--lookback', type=int, default=60, help='[LSTM] Lookback window')
-    parser.add_argument('--hidden-size', type=int, default=64, help='[LSTM] Hidden layer size')
-    parser.add_argument('--epochs', type=int, default=50, help='[LSTM] Training epochs')
     
     # Forecasting parameters
-    parser.add_argument('--prediction-smoothing', type=int, default=5, help='Number of predictions to average')
-    parser.add_argument('--prediction-interval', type=float, default=2.0, help='Seconds between predictions')
+    parser.add_argument('--prediction-smoothing', type=int, default=2, help='Number of predictions to average')
+    parser.add_argument('--prediction-interval', type=float, default=1.0, help='Seconds between predictions')
     
     # Retraining parameters
-    parser.add_argument('--retrain-scale', type=float, default=3.0, help='MAD multiplier for threshold')
-    parser.add_argument('--retrain-min', type=float, default=50.0, help='Minimum retrain threshold (%%)')
-    parser.add_argument('--retrain-consec', type=int, default=2, help='Consecutive violations to retrain')
-    parser.add_argument('--retrain-cooldown', type=int, default=5, help='Min steps between retrains')
+    parser.add_argument('--retrain-scale', type=float, default=2.0, help='MAD multiplier for threshold')
+    parser.add_argument('--retrain-min', type=float, default=20.0, help='Minimum retrain threshold (%%)')
+    parser.add_argument('--retrain-consec', type=int, default=3, help='Consecutive violations to retrain')
+    parser.add_argument('--retrain-cooldown', type=int, default=0, help='Min steps between retrains')
     parser.add_argument('--no-mad', action='store_true', help='Use std instead of MAD')
+    
+    # Backoff parameters
+    parser.add_argument('--retrain-rapid-seconds', type=int, default=8, help='Wall-clock seconds - retrains faster than this trigger backoff')
+    parser.add_argument('--backoff-short-seconds', type=int, default=10, help='Seconds before hidden short attempt')
+    parser.add_argument('--backoff-long-seconds', type=int, default=15, help='Base seconds for backoff window')
+    parser.add_argument('--backoff-max-retrains', type=int, default=5, help='Max retrains during backoff before extension')
+    parser.add_argument('--backoff-clear-consecutive-ok', type=int, default=3, help='Consecutive OK suppressed validations needed to clear backoff')
     
     # Output
     parser.add_argument('--quiet', action='store_true', help='Suppress output')
@@ -141,6 +143,11 @@ def main():
         retrain_use_mad=not args.no_mad,
         retrain_consec=args.retrain_consec,
         retrain_cooldown=args.retrain_cooldown,
+        retrain_rapid_seconds=args.retrain_rapid_seconds,
+        backoff_short_seconds=args.backoff_short_seconds,
+        backoff_long_seconds=args.backoff_long_seconds,
+        backoff_max_retrains=args.backoff_max_retrains,
+        backoff_clear_consecutive_ok=args.backoff_clear_consecutive_ok,
         print_min_validations=args.print_min_validations,
         quiet=args.quiet
     )
@@ -190,8 +197,11 @@ def main():
                 print(f"[Server] Could not start: {e}\n")
     
     # Main forecasting loop
+    next_iteration_time = time.time()
     try:
         while True:
+            loop_start = time.time()
+            
             # Get current data
             if args.csv:
                 if feed_ptr > len(feed_df):
@@ -221,12 +231,21 @@ def main():
                 except Exception:
                     pass
             
-            # Validate
-            forecaster.validate_predictions(live_df)
+            # Validate all ready predictions in chronological order
+            while True:
+                validated = forecaster.validate_predictions(live_df)
+                if validated is None:
+                    break  # No more ready predictions
             
-            # Sleep (only in live mode)
+            # Sleep to maintain consistent intervals (only in live mode)
             if not args.csv:
-                time.sleep(args.prediction_interval)
+                next_iteration_time += args.prediction_interval
+                sleep_time = next_iteration_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    # If we're behind schedule, skip ahead to next interval
+                    next_iteration_time = time.time()
     
     except KeyboardInterrupt:
         if not args.quiet:
