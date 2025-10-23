@@ -8,11 +8,18 @@ import argparse
 import webbrowser
 import threading
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory, redirect
 from collections import deque
 from datetime import datetime
 
 app = Flask(__name__)
+
+# Store server configuration for demo page
+server_config = {
+    'ip': 'localhost',
+    'context': 'system.cpu',
+    'dimension': 'user'
+}
 
 # Store latest predictions
 latest_predictions = {
@@ -43,6 +50,8 @@ def receive_predictions():
         latest_predictions = {
             'predictions': data.get('predictions', []),
             'timestamp': datetime.now().isoformat(),
+            'backoff': data.get('backoff', False),
+            'actual': data.get('actual', 0),
             'metadata': {
                 'context': data.get('context'),
                 'dimension': data.get('dimension'),
@@ -53,7 +62,8 @@ def receive_predictions():
         # Add to history
         prediction_history.append(latest_predictions.copy())
         
-        print(f"[{latest_predictions['timestamp']}] Received {len(latest_predictions['predictions'])} predictions")
+        status = "BACKOFF" if latest_predictions['backoff'] else "OK"
+        print(f"[{latest_predictions['timestamp']}] {status} - Received {len(latest_predictions['predictions'])} predictions")
         
         return jsonify({'status': 'ok', 'received': len(latest_predictions['predictions'])})
     
@@ -68,13 +78,12 @@ def get_predictions():
     global latest_predictions
     
     try:
-        if not latest_predictions['predictions']:
-            return jsonify({'predictions': [], 'error': 'No predictions available yet'}), 404
-        
         return jsonify({
-            'predictions': latest_predictions['predictions'],
-            'timestamp': latest_predictions['timestamp'],
-            'metadata': latest_predictions['metadata']
+            'predictions': latest_predictions.get('predictions', []),
+            'timestamp': latest_predictions.get('timestamp'),
+            'backoff': latest_predictions.get('backoff', False),
+            'actual': latest_predictions.get('actual', 0),
+            'metadata': latest_predictions.get('metadata', {})
         })
     
     except Exception as e:
@@ -93,15 +102,39 @@ def status():
 
 
 @app.route('/history', methods=['GET'])
-def history():
+def get_history():
     """Get prediction history"""
     return jsonify({
         'history': list(prediction_history)
     })
 
 
+@app.route('/')
+def index():
+    """Serve the demo page with current configuration"""
+    return redirect('/demo')
+
+
+@app.route('/demo')
+def demo():
+    """Serve the live predictions demo page"""
+    demo_dir = os.path.join(os.path.dirname(__file__), 'demo')
+    return send_from_directory(demo_dir, 'live-predictions.html')
+
+
+@app.route('/config')
+def get_config():
+    """Get server configuration for demo page"""
+    global server_config
+    return jsonify(server_config)
+
+
 def main(port=5000, open_demo=False, config=None):
     """Start the prediction server"""
+    
+    global server_config
+    if config:
+        server_config.update(config)
     
     if open_demo:
         # Build demo URL with pre-configured parameters
@@ -124,6 +157,8 @@ def main(port=5000, open_demo=False, config=None):
     print("=" * 60)
     print("Prediction Server Running")
     print("=" * 60)
+    print(f"Web UI: http://localhost:{port}/")
+    print(f"Monitoring: {server_config['context']} -> {server_config['dimension']}")
     print(f"Receive predictions: POST http://localhost:{port}/predictions")
     print(f"Get predictions: POST http://localhost:{port}/predict")
     print(f"Status: GET http://localhost:{port}/status")
@@ -152,6 +187,6 @@ if __name__ == '__main__':
         'dimension': args.dimension,
         'ymin': args.ymin,
         'ymax': args.ymax
-    } if args.open_demo else None
+    }
     
     main(port=args.port, open_demo=args.open_demo, config=config)

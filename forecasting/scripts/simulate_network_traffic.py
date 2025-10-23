@@ -251,23 +251,51 @@ def simulate_traffic(pattern='daily', duration=3600, interval=1, verbose=True):
             # Generate traffic level
             target_kbps = generate_traffic_pattern(elapsed, pattern)
             
-            # Clean up finished processes
-            processes = [p for p in processes if p.poll() is None]
+            # Clean up finished processes more aggressively
+            new_processes = []
+            for p in processes:
+                if p.poll() is None:  # Still running
+                    new_processes.append(p)
+                else:
+                    try:
+                        p.terminate()  # Force cleanup
+                        p.wait(timeout=0.1)
+                    except:
+                        pass
+            processes = new_processes
             
-            # Generate actual network traffic using curl/wget to download from fast servers
-            # Calculate bytes to download this interval
-            bytes_to_download = int(target_kbps * 1024 * interval)
+            # Kill oldest process if we have too many stuck ones
+            if len(processes) >= 2:
+                try:
+                    oldest = processes[0]
+                    oldest.terminate()
+                    oldest.wait(timeout=0.1)
+                    processes.pop(0)
+                except:
+                    pass
             
-            if bytes_to_download > 0:
-                # Download from fast.com or similar - using /dev/null endpoint
-                # Using curl with rate limiting
+            # Limit concurrent downloads to prevent resource exhaustion
+            max_concurrent_downloads = 10
+            
+            if len(processes) < max_concurrent_downloads and target_kbps > 10:
+                # Generate actual network traffic using curl/wget to download from fast servers
+                # Using curl with VERY short timeout to prevent pileup
+                # Rotate between multiple servers to avoid per-server connection limits
+                servers = [
+                    'http://speedtest.tele2.net/1MB.zip',
+                    'http://ipv4.download.thinkbroadband.com/1MB.zip',
+                    'http://proof.ovh.net/files/1Mb.dat',
+                ]
+                server_url = servers[step % len(servers)]
+                
                 cmd = [
                     'curl',
                     '-s',  # Silent
-                    '-m', str(interval + 1),  # Timeout
+                    '--max-time', '1',  # Hard 1-second total timeout
+                    '--connect-timeout', '1',  # 1-second connection timeout
                     '--limit-rate', f'{int(target_kbps)}K',  # Rate limit
                     '-o', '/dev/null',  # Discard output
-                    'http://speedtest.tele2.net/1MB.zip'  # Test file
+                    server_url
                 ]
                 
                 try:
@@ -278,7 +306,7 @@ def simulate_traffic(pattern='daily', duration=3600, interval=1, verbose=True):
                         print(f"Warning: Could not start download: {e}")
             
             if verbose:
-                print(f"[{step:4d}] t={elapsed:6.1f}s | Target: {target_kbps:6.1f} KB/s | Active downloads: {len(processes)}")
+                print(f"[{step:4d}] t={elapsed:6.1f}s | Target: {target_kbps:6.1f} KB/s | Active downloads: {len(processes)} (limit: {max_concurrent_downloads})")
             
             step += 1
             time.sleep(interval)

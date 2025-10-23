@@ -154,12 +154,16 @@
     <canvas id="liveChart"></canvas>
     <div class="legend">
       <div class="legend-item">
-        <span class="legend-box" style="background: #2196F3;"></span>
-        <span>Historical (Netdata)</span>
+        <span class="legend-box" style="background: #00AB44;"></span>
+        <span>Actual (Metrics)</span>
       </div>
       <div class="legend-item">
-        <span class="legend-box" style="background: #00AB44; border: 2px dashed #00AB44; height: 0;"></span>
-        <span>Predictions (ML Model)</span>
+        <span class="legend-box" style="background: #9C27B0; border: 2px dashed #9C27B0; height: 0;"></span>
+        <span>Predictions (ML)</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-box" style="background: #F44336;"></span>
+        <span>Backoff (Suppressed)</span>
       </div>
     </div>
   </div>
@@ -238,18 +242,28 @@
         
         if (response.ok) {
           const result = await response.json();
-          if (result.predictions && Array.isArray(result.predictions)) {
-            console.log('[DEBUG] Got predictions from ML server:', result.predictions);
-            return result.predictions;
-          }
+          console.log('[DEBUG] Got ML server response:', {
+            predictions: result.predictions?.length || 0,
+            backoff: result.backoff,
+            actual: result.actual
+          });
+          return {
+            predictions: result.predictions || [],
+            backoff: result.backoff || false,
+            actual: result.actual || historicalValues[historicalValues.length - 1] || 0
+          };
         }
       } catch (err) {
-        console.log('[DEBUG] ML server unavailable, using static predictions:', err.message);
+        console.log('[DEBUG] ML server unavailable:', err.message);
       }
 
       // Fallback: static predictions (repeat last value)
       const lastVal = historicalValues[historicalValues.length - 1] || 0;
-      return Array(horizon).fill(lastVal);
+      return {
+        predictions: Array(horizon).fill(lastVal),
+        backoff: false,
+        actual: lastVal
+      };
     }
 
     async function updateChart() {
@@ -257,29 +271,41 @@
         // Fetch live netdata data - this gives us fresh latest points
         const netdataData = await fetchNetdataData();
         
-        // Keep the full window from netdata (it's already limited by historyPoints)
-        historicalData = netdataData;
-
         // Extract values for prediction
         const values = netdataData.map(d => d.value);
         
-        // Fetch predictions
-        const predictions = await fetchPredictions(values);
+        // Fetch predictions (includes backoff status and actual value)
+        const mlData = await fetchPredictions(values);
         
+        console.log('[DEBUG] ML Data received:', {
+          backoff: mlData.backoff,
+          predictions: mlData.predictions.length,
+          timestamp: new Date().toLocaleTimeString()
+        });
+        
+        // Update historical data with backoff status
+        historicalData = netdataData.map(d => ({
+          ...d,
+          backoff: mlData.backoff
+        }));
+
         // Build prediction data points (continuation from last historical point)
         const lastTimestamp = netdataData[netdataData.length - 1].timestamp;
         const interval = netdataData.length > 1 
           ? netdataData[netdataData.length - 1].timestamp - netdataData[netdataData.length - 2].timestamp
           : 1000; // default 1s
         
-        predictedData = predictions.map((val, i) => ({
+        predictedData = mlData.predictions.map((val, i) => ({
           timestamp: lastTimestamp + (i + 1) * interval,
           value: val
         }));
 
         // Update chart
         renderChart();
-        showStatus(`✓ Updated at ${new Date().toLocaleTimeString()} — ${netdataData.length} historical, ${predictions.length} predicted`, 'success');
+        const statusMsg = mlData.backoff 
+          ? `⚠️ BACKOFF — ${netdataData.length} historical, predictions suppressed`
+          : `✓ Updated at ${new Date().toLocaleTimeString()} — ${netdataData.length} historical, ${mlData.predictions.length} predicted`;
+        showStatus(statusMsg, mlData.backoff ? 'error' : 'success');
       } catch (err) {
         showStatus(`❌ Update failed: ${err.message}`, 'error');
         console.error(err);
@@ -314,7 +340,24 @@
         ? historicalData[historicalData.length - 1].value 
         : null;
       const predictionNulls = Array(historicalData.length - 1).fill(null);
-      const predictionValues = [lastHistoricalValue, ...predictedData.map(d => d.value)];
+      
+      // Check if we're in backoff mode from the latest historical data point
+      const inBackoff = historicalData.length > 0 && historicalData[historicalData.length - 1].backoff;
+      
+      console.log('[DEBUG] Backoff state:', inBackoff, 'Predictions:', predictedData.length);
+      
+      // Build prediction arrays based on backoff state
+      let normalPredictions, suppressedPredictions;
+      
+      if (inBackoff) {
+        // In backoff: show red line, hide purple line
+        normalPredictions = [...predictionNulls, ...Array(predictedData.length + 1).fill(null)];
+        suppressedPredictions = [...predictionNulls, lastHistoricalValue, ...predictedData.map(d => d.value)];
+      } else {
+        // Normal mode: show purple line, hide red line
+        normalPredictions = [...predictionNulls, lastHistoricalValue, ...predictedData.map(d => d.value)];
+        suppressedPredictions = [...predictionNulls, ...Array(predictedData.length + 1).fill(null)];
+      }
 
       if (!chart) {
         // Create chart on first render
@@ -324,20 +367,30 @@
             labels: labels,
             datasets: [
               {
-                label: 'Historical (Netdata)',
+                label: 'Actual (Metrics)',
                 data: [...historicalValues, ...historicalNulls],
-                borderColor: '#2196F3',
-                backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                borderColor: '#00AB44',
+                backgroundColor: 'rgba(0, 171, 68, 0.1)',
                 borderWidth: 2,
                 pointRadius: 0,
                 tension: 0.1
               },
               {
                 label: 'Predictions (ML)',
-                data: [...predictionNulls, ...predictionValues],
-                borderColor: '#00AB44',
-                backgroundColor: 'rgba(0, 171, 68, 0.1)',
-                borderWidth: 2,
+                data: normalPredictions,
+                borderColor: '#9C27B0',
+                backgroundColor: 'rgba(156, 39, 176, 0.1)',
+                borderWidth: 3,
+                borderDash: [5, 5],
+                pointRadius: 0,
+                tension: 0.1
+              },
+              {
+                label: 'Backoff (Suppressed)',
+                data: suppressedPredictions,
+                borderColor: '#F44336',
+                backgroundColor: 'rgba(244, 67, 54, 0.1)',
+                borderWidth: 3,
                 borderDash: [5, 5],
                 pointRadius: 0,
                 tension: 0.1
@@ -383,7 +436,8 @@
         // Update existing chart data in place
         chart.data.labels = labels;
         chart.data.datasets[0].data = [...historicalValues, ...historicalNulls];
-        chart.data.datasets[1].data = [...predictionNulls, ...predictionValues];
+        chart.data.datasets[1].data = normalPredictions;
+        chart.data.datasets[2].data = suppressedPredictions;
         
         // Update y-axis limits if configured
         const yMin = document.getElementById('yMin').value;
@@ -435,47 +489,83 @@
     }
 
     // Initialize empty chart on load
-    window.addEventListener('load', () => {
-      // Check for URL parameters to auto-configure
-      const params = new URLSearchParams(window.location.search);
+    window.addEventListener('load', async () => {
+      // First, try to fetch config from the server
+      let configuredFromServer = false;
       
-      let configuredFromParams = false;
-      
-      if (params.has('netdata')) {
-        document.getElementById('netdataUrl').value = params.get('netdata');
-        configuredFromParams = true;
-      }
-      if (params.has('context')) {
-        document.getElementById('chartId').value = params.get('context');
-        configuredFromParams = true;
-      }
-      if (params.has('dimension')) {
-        document.getElementById('dimension').value = params.get('dimension');
-        configuredFromParams = true;
-      }
-      if (params.has('horizon')) {
-        document.getElementById('horizon').value = params.get('horizon');
-        configuredFromParams = true;
-      }
-      if (params.has('mlServer')) {
-        document.getElementById('mlServerUrl').value = params.get('mlServer');
-        configuredFromParams = true;
-      }
-      if (params.has('ymin')) {
-        document.getElementById('yMin').value = params.get('ymin');
-        configuredFromParams = true;
-      }
-      if (params.has('ymax')) {
-        document.getElementById('yMax').value = params.get('ymax');
-        configuredFromParams = true;
-      }
-      if (params.has('points')) {
-        document.getElementById('historyPoints').value = params.get('points');
-        configuredFromParams = true;
+      try {
+        const configResponse = await fetch('/config');
+        if (configResponse.ok) {
+          const serverConfig = await configResponse.json();
+          
+          // Apply server configuration
+          if (serverConfig.ip) {
+            document.getElementById('netdataUrl').value = `http://${serverConfig.ip}:19999`;
+          }
+          if (serverConfig.context) {
+            document.getElementById('chartId').value = serverConfig.context;
+          }
+          if (serverConfig.dimension) {
+            document.getElementById('dimension').value = serverConfig.dimension;
+          }
+          if (serverConfig.ymin !== null && serverConfig.ymin !== undefined) {
+            document.getElementById('yMin').value = serverConfig.ymin;
+          }
+          if (serverConfig.ymax !== null && serverConfig.ymax !== undefined) {
+            document.getElementById('yMax').value = serverConfig.ymax;
+          }
+          
+          configuredFromServer = true;
+          console.log('Configuration loaded from server:', serverConfig);
+        }
+      } catch (e) {
+        console.log('Could not fetch server config, checking URL parameters:', e);
       }
       
-      // Show configuration info
-      if (configuredFromParams) {
+      // If not configured from server, check for URL parameters
+      if (!configuredFromServer) {
+        const params = new URLSearchParams(window.location.search);
+        
+        let configuredFromParams = false;
+        
+        if (params.has('netdata')) {
+          document.getElementById('netdataUrl').value = params.get('netdata');
+          configuredFromParams = true;
+        }
+        if (params.has('context')) {
+          document.getElementById('chartId').value = params.get('context');
+          configuredFromParams = true;
+        }
+        if (params.has('dimension')) {
+          document.getElementById('dimension').value = params.get('dimension');
+          configuredFromParams = true;
+        }
+        if (params.has('horizon')) {
+          document.getElementById('horizon').value = params.get('horizon');
+          configuredFromParams = true;
+        }
+        if (params.has('mlServer')) {
+          document.getElementById('mlServerUrl').value = params.get('mlServer');
+          configuredFromParams = true;
+        }
+        if (params.has('ymin')) {
+          document.getElementById('yMin').value = params.get('ymin');
+          configuredFromParams = true;
+        }
+        if (params.has('ymax')) {
+          document.getElementById('yMax').value = params.get('ymax');
+          configuredFromParams = true;
+        }
+        if (params.has('points')) {
+          document.getElementById('historyPoints').value = params.get('points');
+          configuredFromParams = true;
+        }
+        
+        configuredFromServer = configuredFromParams;
+      }
+      
+      // Show configuration info and auto-start if configured
+      if (configuredFromServer) {
         const context = document.getElementById('chartId').value;
         const dimension = document.getElementById('dimension').value;
         const horizon = document.getElementById('horizon').value;
@@ -485,8 +575,8 @@
         document.getElementById('configDisplay').textContent = 
           `${context}.${dimension} | Horizon: ${horizon} | Y-axis: [${ymin}, ${ymax}]`;
         
-        // Auto-start immediately when configured from params
-        showStatus('Starting live updates (auto-configured from XGBoost)...', 'info');
+        // Auto-start immediately when configured
+        showStatus('Starting live updates (auto-configured from forecast_main.py)...', 'info');
         setTimeout(() => startLiveChart(), 500);
       } else {
         // Manual mode - show config panel
