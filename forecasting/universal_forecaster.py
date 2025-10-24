@@ -151,6 +151,11 @@ class UniversalForecaster:
         self.y_true_list = []
         self.y_pred_list = []
         
+        # Baseline tracking (for adaptive threshold adjustment)
+        self.baseline_mean = None
+        self.baseline_std = None
+        self.baseline_deviation_history = deque(maxlen=50)
+        
         # Prediction tracking
         self.pending_validations = deque(maxlen=100)
         self.recent_predictions = deque(maxlen=max(1, int(prediction_smoothing)))
@@ -202,8 +207,13 @@ class UniversalForecaster:
         train_time = self.model.train(data)
         self.training_times.append(train_time)
         
+        # Calculate baseline statistics from training data
+        self.baseline_mean = float(data.mean())
+        self.baseline_std = float(data.std())
+        
         if not self.quiet:
             print(f"[{self.model.get_model_name()}] Init train t={train_time:.3f}s")
+            print(f"[Baseline] Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}")
         
         return train_time
     
@@ -605,6 +615,11 @@ class UniversalForecaster:
             retrain_time = self.model.train(live_data)
             self.training_times.append(retrain_time)
             self.last_retrain_step = self.step
+            
+            # Update baseline statistics with new training data
+            self.baseline_mean = float(live_data.mean())
+            self.baseline_std = float(live_data.std())
+            
             # If we are in an active backoff, count this retrain for evaluation
             if getattr(self, '_backoff_active', False):
                 try:
@@ -617,7 +632,7 @@ class UniversalForecaster:
             self.backoff_fail_count = 0
             self._backoff_announced = False
             self._append_backoff_log(self.model.get_model_name(), "hidden_retrain_executed",
-                                     f"step={self.step}, time={retrain_time:.3f}s")
+                                     f"step={self.step}, time={retrain_time:.3f}s, baseline_mean={self.baseline_mean:.2f}")
 
             # Immediately generate a silent prediction (hidden) after retrain so we can validate it later
             try:
@@ -768,13 +783,37 @@ class UniversalForecaster:
         self.errors.append(mean_horizon_error)
         self.recent_errors.append(mean_horizon_error)
         
-        # Compute threshold
+        # Calculate baseline deviation if baseline exists
+        baseline_deviation = 0.0
+        if self.baseline_mean is not None and self.baseline_std is not None and self.baseline_std > 1e-6:
+            # Calculate z-score: how many std deviations from training baseline
+            current_actual = float(np.mean(horizon_actuals))
+            baseline_deviation = abs(current_actual - self.baseline_mean) / self.baseline_std
+            self.baseline_deviation_history.append(baseline_deviation)
+        
+        # Compute threshold with baseline adjustment
         threshold = None
         if self.dynamic_retrain:
             try:
-                threshold = compute_threshold_from_errors(
+                base_threshold = compute_threshold_from_errors(
                     self.recent_errors, self.retrain_scale, self.retrain_min, self.retrain_use_mad
                 )
+                
+                # Adjust threshold based on baseline deviation
+                # If current values deviate significantly from training baseline,
+                # lower the threshold (more sensitive to errors)
+                if baseline_deviation > 2.0:  # More than 2 std deviations from baseline
+                    # Reduce threshold by up to 30% based on deviation magnitude
+                    adjustment_factor = max(0.7, 1.0 - (baseline_deviation - 2.0) * 0.1)
+                    threshold = base_threshold * adjustment_factor
+                    
+                    if not self.quiet and len(self.baseline_deviation_history) % 10 == 0:
+                        print(f"[Baseline] Deviation: {baseline_deviation:.2f}σ, "
+                              f"Threshold: {base_threshold:.1f}% → {threshold:.1f}% "
+                              f"(adjustment: {adjustment_factor:.2f}x)")
+                else:
+                    threshold = base_threshold
+                    
             except Exception as e:
                 self._append_backoff_log(self.model.get_model_name(), "threshold_compute_failed", f"err={e}")
                 threshold = float(self.retrain_min)
@@ -980,9 +1019,14 @@ class UniversalForecaster:
                 prev_retrain_time = self.last_retrain_time
                 self.last_retrain_time = time.time()
                 self.consec_count = 0
+                
+                # Update baseline statistics with new training data
+                self.baseline_mean = float(live_data.mean())
+                self.baseline_std = float(live_data.std())
 
                 if not self.quiet:
                     print(f"[{self.model.get_model_name()}] Retrain s={self.step} t={retrain_time:.3f}s thr={threshold:.3f}%")
+                    print(f"[Baseline] Updated - Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}")
                 
                 # After retrain completes, check if it was rapid and trigger backoff
                 if rapid_retrain_detected:
@@ -1032,5 +1076,9 @@ class UniversalForecaster:
             "pbias_pct": pbias,
             "avg_training_time": safe_mean(self.training_times),
             "avg_inference_time": safe_mean(self.inference_times),
-            "total_retrains": len(self.training_times) - 1  # Exclude initial train
+            "total_retrains": len(self.training_times) - 1,  # Exclude initial train
+            "baseline_mean": self.baseline_mean if self.baseline_mean is not None else float('nan'),
+            "baseline_std": self.baseline_std if self.baseline_std is not None else float('nan'),
+            "mean_baseline_deviation": safe_mean(self.baseline_deviation_history),
+            "max_baseline_deviation": float(np.max(self.baseline_deviation_history)) if len(self.baseline_deviation_history) else float('nan')
         }

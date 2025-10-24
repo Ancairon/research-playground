@@ -89,7 +89,7 @@ def main():
     # Model parameters
     parser.add_argument('--horizon', type=int, default=5, help='Forecast horizon (steps ahead)')
     parser.add_argument('--window', type=int, default=25, help='Inference window size (for predictions)')
-    parser.add_argument('--train-window', type=int, default=1000, help='Initial training window size (defaults to --window)')
+    parser.add_argument('--train-window', type=int, default=100, help='Initial training window size (defaults to --window)')
     parser.add_argument('--random-state', type=int, default=42, help='Random seed')
     
     
@@ -304,6 +304,8 @@ def main():
         print(f"MAPE - Mean: {stats['mean_avg_err']:.2f}%  Max: {stats['max_avg_err']:.2f}%  Min: {stats['min_avg_err']:.2f}%")
         print(f"MAPE - P80: {stats['p80_avg_err']:.2f}%  P95: {stats['p95_avg_err']:.2f}%  P99: {stats['p99_avg_err']:.2f}%")
         print(f"MBE: {stats['mbe']:.2f}  PBIAS: {stats['pbias_pct']:.2f}%")
+        print(f"Baseline - Mean: {stats['baseline_mean']:.2f}  Std: {stats['baseline_std']:.2f}")
+        print(f"Baseline Deviation - Mean: {stats['mean_baseline_deviation']:.2f}σ  Max: {stats['max_baseline_deviation']:.2f}σ")
         print(f"Avg Training Time: {stats['avg_training_time']:.3f}s")
         print(f"Avg Inference Time: {stats['avg_inference_time']:.6f}s")
         print(f"Total Retrains: {stats['total_retrains']}")
