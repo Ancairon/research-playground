@@ -1,29 +1,132 @@
 # Universal Time Series Forecasting Framework
 
-Modular, model-agnostic forecasting system with support for multiple ML models.
+This is a modular, model-agnostic forecasting system with adaptive retraining and backoff control.
 
 ## Architecture
 
-```
+```bash
 forecasting/
-├── forecast_main.py           # Main entry point (CLI)
-├── universal_forecaster.py    # Model-agnostic forecasting engine
+├── forecast_main.py           # CLI entry point
+├── universal_forecaster.py    # Core forecasting engine
+├── prediction_server.py       # Live visualization server
 ├── models/
-│   ├── __init__.py           # Model factory
-│   ├── base_model.py         # Abstract base class
+│   ├── __init__.py           # Model factory & registry
+│   ├── base_model.py         # Abstract base interface
 │   ├── xgboost_model.py      # XGBoost implementation
 │   ├── prophet_model.py      # Prophet implementation
+│   ├── prophet_auto_model.py # Prophet with auto seasonality detection
 │   └── lstm_model.py         # LSTM/GRU implementation
-└── xgboost_whole.py          # Legacy (deprecated)
+└── demo/
+    ├── live-predictions.html  # Web UI for visualization
+    └── inject-predictions.js  # Client-side charting
 ```
 
-## Supported Models
+## Components
 
-| Model | Best For | Online Learning | Speed | Predictive |
-|-------|----------|-----------------|-------|------------|
-| **XGBoost** | General regression | ✅ Yes | ⚡⚡⚡ Fast | ❌ Reactive |
-| **Prophet** | Periodic/seasonal patterns | ❌ No | ⚡⚡ Medium | ✅ Yes |
-| **LSTM** | Complex sequences | ❌ No | ⚡ Slow | ✅ Yes |
+### forecast_main.py
+
+- CLI argument parsing
+- Data acquisition (Netdata API or pre-made CSV)
+- Model initialization and configuration (can hardcode default values, so you can run just forecast.py)
+  
+  > Helps with testing, as you can have two terminal tabs, and alter the defaults in the editor, and not in the command with the arrows
+- Main prediction loop with timing control
+- Live server management (auto-kills old instances, so you don't have a zillion servers running)
+- Final statistics reporting (once you hit ctrl+c, it reports main metrics)
+
+### universal_forecaster.py
+
+Core forecasting engine with:
+
+- **Prediction smoothing**: Rolling average of last N predictions
+- **Deferred validation**: Wait for full horizon before measuring error (so we can measure the full prediction against the full real thing)
+- **Adaptive thresholds**: MAD/std-based error thresholds with baseline deviation adjustment (this helps with metrics being spiky, or a bit unstable, so that we don't retrain all the time)
+- **Dynamic retraining**: Trigger retraining on consecutive threshold violations
+- **Backoff mechanism**: Suppress predictions when model is unstable (if there is rapid retraining detected, don't give predictions, we are probably looking at something that is beginning to be event-based rather than a pattern based behavior)
+  - **Hidden predictions**: Generate and validate suppressed predictions during backoff
+- **Baseline tracking**: Monitor data drift from training distribution
+- **Metrics**: MAPE (capped at 1000%), MBE, PBIAS, percentiles
+
+### prediction_server.py
+
+Flask-based WebSocket server for live visualization:
+
+- Serves live HTML dashboard
+- Pushes predictions and actuals to browser
+- Handles backoff state for UI coloring (purple=normal, red=backoff)
+- CORS enabled for development
+
+### Models (inside `models/`)
+
+plug and play model implementations following `BaseTimeSeriesModel` interface:
+
+- **XGBoost**: Fast gradient boosting, supports online learning
+- **Prophet**: Meta's forecasting library for seasonality/trends
+- **Prophet Auto**: Automated seasonality detection from data
+- **LSTM**: PyTorch recurrent neural network for sequences
+
+All models expose:
+
+- `train(data)`: Train on data window
+- `predict()`: Generate horizon-step predictions
+- `update(data)`: Incremental learning (if supported)
+- `supports_online_learning()`: Capability flag
+
+(prophet was really bad, name suggested otherwise :smile:, LSTM was not a good performer initially, but I haven't tested it much)
+
+**This has mainly been developed for XGBoost, so some stuff might not be present in the other two models, they were made to have a bit of variety**
+
+| Model       | Best For                   | Online Learning | Speed     | Predictive |
+|-------------|----------------------------|-----------------|-----------|------------|
+| **XGBoost** | General regression         | ✅ Yes           | ⚡⚡⚡ Fast  | ❌ Reactive |
+| **Prophet** | Periodic/seasonal patterns | ❌ No            | ⚡⚡ Medium | ✅ Yes      |
+| **LSTM**    | Complex sequences          | ❌ No            | ⚡ Slow    | ✅ Yes      |
+
+## Key Features
+
+### Adaptive Retraining
+
+- **MAD-based thresholds**: Robust to outliers (1.4826 × MAD ≈ std)
+- **Baseline deviation adjustment**: Lowers threshold when data drifts from training distribution
+- **Consecutive violations**: Requires N consecutive bad predictions to retrain
+- **Cooldown period** (best be 0 though, as waiting for retrain affects the backoff retrain threshold): Prevents over-retraining
+
+### Backoff Control
+
+When rapid retraining is detected (retrains within `--retrain-rapid-seconds`, default 10s):
+
+- **Suppresses predictions**: Blocks user-facing predictions for a specific time period
+- **Hidden validation**: Continues generating/validating predictions in background
+- **Adaptive extension**: Extends backoff if hidden predictions still fail
+- **Auto-clear**: Exits backoff after N consecutive OK validations
+
+(here we could also make the background evaluation on a longer interval, but that would make the model less responsive to re-emerging from suppression)
+
+### Baseline Deviation Tracking
+
+Monitors z-score of current data vs training baseline:
+
+```python
+deviation = |current_mean - baseline_mean| / baseline_std
+```
+
+If deviation > 2.0σ, threshold is lowered (more sensitive retraining):
+
+```python
+adjustment = max(0.7, 1.0 - (deviation - 2.0) × 0.1)
+threshold_adjusted = base_threshold × adjustment
+```
+
+### Error Calculation
+
+Symmetric MAPE (robust to near-zero values):
+
+```python
+error = |actual - pred| / ((|actual| + |pred|) / 2) × 100%
+```
+
+- Capped at 1000% to prevent overflow
+- Skips validation when both actual and predicted near zero
 
 ## Quick Start
 
@@ -32,12 +135,6 @@ forecasting/
 ```bash
 # XGBoost (default)
 python3 forecast_main.py
-
-# Prophet for spiky patterns
-python3 forecast_main.py --model prophet --custom-seasonality spike:15:5
-
-# LSTM for complex patterns
-python3 forecast_main.py --model lstm --lookback 120 --epochs 100
 ```
 
 ### Common Options
@@ -70,210 +167,3 @@ python3 forecast_main.py --model lstm --lookback 120 --epochs 100
 --quiet                        # Suppress console output
 --no-live-server              # Disable visualization server
 ```
-
-## Model-Specific Parameters
-
-### XGBoost
-```bash
-python3 forecast_main.py \
-  --model xgboost \
-  --window 300 \
-  --train-window 600 \
-  --prediction-smoothing 5
-```
-**Note**: `--train-window 600` trains on 600s (40 cycles), `--window 300` uses 300s for inference (faster predictions)
-
-### Prophet
-```bash
-# For 15-second spike cycle
-python3 forecast_main.py \
-  --model prophet \
-  --custom-seasonality spike_cycle:15:5 \
-  --window 300 \
-  --prediction-smoothing 3
-
-# For multiple seasonalities, run prophet with code
-```
-
-### LSTM
-```bash
-python3 forecast_main.py \
-  --model lstm \
-  --lookback 120 \
-  --hidden-size 64 \
-  --epochs 100 \
-  --window 600 \
-  --prediction-smoothing 7
-```
-
-## Pattern-Specific Recommendations
-
-### Smooth Patterns (sine wave, daily cycle)
-```bash
-python3 forecast_main.py \
-  --model prophet \
-  --window 180 \
-  --prediction-smoothing 3 \
-  --prediction-interval 1.0
-```
-
-### Spiky Patterns (regular bursts)
-```bash
-python3 forecast_main.py \
-  --model prophet \
-  --custom-seasonality spike:15:5 \
-  --window 600 \
-  --prediction-smoothing 7 \
-  --prediction-interval 2.0
-```
-
-### Step Changes (business hours pattern)
-```bash
-python3 forecast_main.py \
-  --model xgboost \
-  --window 300 \
-  --prediction-smoothing 5 \
-  --prediction-interval 2.0 \
-  --retrain-scale 2.0
-```
-
-### Trends (increasing baseline)
-```bash
-python3 forecast_main.py \
-  --model lstm \
-  --lookback 120 \
-  --window 600 \
-  --prediction-smoothing 5 \
-  --retrain-scale 2.0
-```
-
-## Adding New Models
-
-1. Create new file in `models/` (e.g., `arima_model.py`)
-2. Implement `BaseTimeSeriesModel` interface:
-   ```python
-   from models.base_model import BaseTimeSeriesModel
-   
-   class ARIMAModel(BaseTimeSeriesModel):
-       def train(self, data, **kwargs): ...
-       def predict(self, **kwargs): ...
-       def update(self, data, **kwargs): ...
-       def get_model_name(self): ...
-       def get_model_params(self): ...
-   ```
-3. Register in `models/__init__.py`:
-   ```python
-   from models.arima_model import ARIMAModel
-   
-   MODEL_REGISTRY = {
-       'xgboost': XGBoostModel,
-       'prophet': ProphetModel,
-       'lstm': LSTMModel,
-       'arima': ARIMAModel,  # Add here
-   }
-   ```
-4. Use it:
-   ```bash
-   python3 forecast_main.py --model arima
-   ```
-
-## Universal Forecaster Features
-
-The `UniversalForecaster` class handles all model-agnostic logic:
-
-- ✅ **Prediction smoothing** - ensemble averaging of recent predictions
-- ✅ **Deferred validation** - validate predictions after horizon steps
-- ✅ **Error tracking** - MAPE, MBE, PBIAS metrics
-- ✅ **Dynamic retraining** - MAD-based threshold with consecutive violations
-- ✅ **Logging** - CSV logs for retrain decisions
-- ✅ **Statistics** - comprehensive final statistics
-
-All models benefit from these features automatically!
-
-## Understanding Retraining
-
-### MAD-Based Thresholds
-
-```
-threshold = max(retrain_min, retrain_scale × MAD × 1.4826)
-
-For MAPE errors:
-- retrain_scale = 2.0-5.0 (default 3.0)
-- retrain_min = 20.0-50.0%
-
-Example:
-errors = [40%, 45%, 38%, 42%]
-MAD ≈ 3%
-threshold = max(50%, 3.0 × 3% × 1.4826) = max(50%, 13.3%) = 50%
-```
-
-### Retrain Triggers
-
-Retraining occurs when **all** conditions are met:
-1. `mean_horizon_error > threshold` for `retrain_consec` consecutive validations
-2. At least `retrain_cooldown` steps since last retrain
-3. At least `retrain_consec` errors collected
-
-## Output
-
-### Console Output
-```
-[2025-10-15 07:00:26] VALIDATION step=39 mean_horizon_error=21.02% threshold=50.00% (retrain_min=50.0)
-[Prophet (Meta)] Retrained at step 45 (time=2.341s), threshold=65.3%
-```
-
-### Retrain Log
-CSV file: `{model_name}_retrain_log.csv`
-```
-step,timestamp,pred_timestamp,mean_horizon_error_pct,threshold,consec_count,last_retrain_step,retrain_triggered
-39,2025-10-15 07:00:26,36,21.02,50.0,0,-9999,False
-45,2025-10-15 07:00:32,42,67.31,65.3,2,39,True
-```
-
-### Final Statistics
-```
-==============================================================
-Final Statistics (Prophet (Meta))
-==============================================================
-MAPE - Mean: 18.45%  Max: 67.31%  Min: 5.22%
-MAPE - P80: 23.11%  P95: 45.67%  P99: 62.88%
-MBE: -2.34  PBIAS: -1.23%
-Avg Training Time: 2.134s
-Avg Inference Time: 0.012345s
-Total Retrains: 3
-==============================================================
-```
-
-## Dependencies
-
-```bash
-# Core
-pip install pandas numpy requests
-
-# XGBoost
-pip install pycaret[time_series] xgboost
-
-# Prophet
-pip install prophet
-
-# LSTM
-pip install torch scikit-learn
-```
-
-## Migration from Legacy
-
-Old code:
-```bash
-python3 xgboost_whole.py
-```
-
-New equivalent:
-```bash
-python3 forecast_main.py --model xgboost
-```
-
-The new system is **fully backward compatible** in functionality but provides:
-- ✅ Multiple model support
-- ✅ Cleaner architecture
-- ✅ Easier to extend
-- ✅ Better code organization

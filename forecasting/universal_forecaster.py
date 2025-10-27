@@ -388,6 +388,16 @@ class UniversalForecaster:
         self._backoff_announced = False
         # Clear any pending visible predictions - they shouldn't validate during backoff
         self.pending_validations.clear()
+        
+        # Print a clear message when entering backoff
+        if not self.quiet:
+            until_str = _format_timestamp_local(until_ts)
+            duration = until_ts - time.time()
+            print(f"\n{'='*70}")
+            print(f"[BACKOFF] Entering prediction suppression mode until {until_str}")
+            print(f"[BACKOFF] Duration: {duration:.1f}s - Predictions will be generated but suppressed")
+            print(f"[BACKOFF] Reason: Rapid retraining detected (model unstable)")
+            print(f"{'='*70}\n")
 
     def _maybe_finish_backoff(self, threshold: Optional[float]) -> None:
         """When a backoff window expires, decide whether to resume predictions or extend backoff.
@@ -452,6 +462,16 @@ class UniversalForecaster:
             self.user_prediction_block_until = scheduled
             sched_str = _format_timestamp_local(scheduled)
             avg_err_str = f"{avg_error:.3f}" if avg_error is not None else "N/A"
+            
+            # Print clear extension message
+            if not self.quiet:
+                duration = scheduled - now
+                print(f"\n{'='*70}")
+                print(f"[BACKOFF] Extended until {sched_str} (+{duration:.1f}s)")
+                print(f"[BACKOFF] Avg Error: {avg_err_str}% | Threshold: {threshold:.3f}%")
+                print(f"[BACKOFF] Retrains: {self._retrain_count_since_backoff_start} | OK Streak: {self._consecutive_ok_suppressed}/{required_ok}")
+                print(f"{'='*70}\n")
+            
             self._append_backoff_log(
                 self.model.get_model_name(),
                 'extend_backoff_after_evaluation',
@@ -468,6 +488,13 @@ class UniversalForecaster:
             self.backoff_fail_count = 0
             self.user_prediction_block_until = time.time()
             self._backoff_active = False
+            
+            # Print clear resume message
+            if not self.quiet:
+                print(f"\n{'='*70}")
+                print(f"[BACKOFF] Cleared - Resuming normal predictions")
+                print(f"[BACKOFF] Reason: Performance stabilized (OK Streak: {self._consecutive_ok_suppressed}/{required_ok})")
+                print(f"{'='*70}\n")
             avg_err_str = f"{avg_error:.3f}" if avg_error is not None else "N/A"
             self._append_backoff_log(self.model.get_model_name(), 'backoff_cleared_by_evaluation',
                                      f'avg_err={avg_err_str}%, retrains={self._retrain_count_since_backoff_start}, ok_consec={self._consecutive_ok_suppressed}')
@@ -593,6 +620,14 @@ class UniversalForecaster:
                     self.backoff_fail_count = 0
                     self.user_prediction_block_until = time.time()
                     self._backoff_active = False
+                    
+                    # Print clear resume message
+                    if not self.quiet:
+                        print(f"\n{'='*70}")
+                        print(f"[BACKOFF] Cleared - Resuming normal predictions")
+                        print(f"[BACKOFF] Reason: {self._consecutive_ok_suppressed} consecutive OK validations")
+                        print(f"{'='*70}\n")
+                    
                     self._append_backoff_log(
                         self.model.get_model_name(), 
                         'backoff_cleared_by_consecutive_ok',
@@ -793,6 +828,7 @@ class UniversalForecaster:
         
         # Compute threshold with baseline adjustment
         threshold = None
+        baseline_adjustment_info = None  # Store info for later printing
         if self.dynamic_retrain:
             try:
                 base_threshold = compute_threshold_from_errors(
@@ -807,10 +843,9 @@ class UniversalForecaster:
                     adjustment_factor = max(0.7, 1.0 - (baseline_deviation - 2.0) * 0.1)
                     threshold = base_threshold * adjustment_factor
                     
+                    # Store for later printing (only if we're actually going to print VAL line)
                     if not self.quiet and len(self.baseline_deviation_history) % 10 == 0:
-                        print(f"[Baseline] Deviation: {baseline_deviation:.2f}σ, "
-                              f"Threshold: {base_threshold:.1f}% → {threshold:.1f}% "
-                              f"(adjustment: {adjustment_factor:.2f}x)")
+                        baseline_adjustment_info = (baseline_deviation, base_threshold, threshold, adjustment_factor)
                 else:
                     threshold = base_threshold
                     
@@ -841,6 +876,14 @@ class UniversalForecaster:
         
         # Print validation details only if not in backoff
         if not self.quiet and not in_backoff_now:
+            # First print baseline adjustment info if available
+            if baseline_adjustment_info is not None:
+                baseline_deviation, base_threshold, threshold, adjustment_factor = baseline_adjustment_info
+                print(f"[Baseline] Deviation: {baseline_deviation:.2f}σ, "
+                      f"Threshold: {base_threshold:.1f}% → {threshold:.1f}% "
+                      f"(adjustment: {adjustment_factor:.2f}x)")
+            
+            # Then print validation line
             try:
                 # Use current time (when validation happens) for real-time heartbeat
                 import time as time_module
@@ -952,6 +995,14 @@ class UniversalForecaster:
                         self.backoff_fail_count = 0
                         self.user_prediction_block_until = time.time()
                         self._backoff_active = False
+                        
+                        # Print clear resume message
+                        if not self.quiet:
+                            print(f"\n{'='*70}")
+                            print(f"[BACKOFF] Cleared - Resuming normal predictions")
+                            print(f"[BACKOFF] Reason: {self._consecutive_ok_suppressed} consecutive OK validations")
+                            print(f"{'='*70}\n")
+                        
                         self._append_backoff_log(
                             self.model.get_model_name(), 
                             'backoff_cleared_by_consecutive_ok',

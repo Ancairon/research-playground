@@ -89,7 +89,7 @@ def main():
     # Model parameters
     parser.add_argument('--horizon', type=int, default=5, help='Forecast horizon (steps ahead)')
     parser.add_argument('--window', type=int, default=25, help='Inference window size (for predictions)')
-    parser.add_argument('--train-window', type=int, default=100, help='Initial training window size (defaults to --window)')
+    parser.add_argument('--train-window', type=int, default=500, help='Initial training window size (defaults to --window)')
     parser.add_argument('--random-state', type=int, default=42, help='Random seed')
     
     
@@ -99,7 +99,7 @@ def main():
     
     # Retraining parameters
     parser.add_argument('--retrain-scale', type=float, default=3.0, help='MAD multiplier for threshold')
-    parser.add_argument('--retrain-min', type=float, default=25.0, help='Minimum retrain threshold (%%)')
+    parser.add_argument('--retrain-min', type=float, default=30.0, help='Minimum retrain threshold (%%)')
     parser.add_argument('--retrain-consec', type=int, default=3, help='Consecutive violations to retrain')
     parser.add_argument('--retrain-cooldown', type=int, default=0, help='Min steps between retrains')
     parser.add_argument('--no-mad', action='store_true', help='Use std instead of MAD')
