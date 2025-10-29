@@ -83,7 +83,7 @@ def generate_traffic_pattern(t, pattern='daily'):
             # Cached content (low bandwidth)
             base = 40 + 20 * math.sin(t * 2 * math.pi / 20)
         
-        noise = random.gauss(0, 8)
+        noise = random.gauss(0, 2)
         return max(10, base + noise)
     
     elif pattern == 'microservices':

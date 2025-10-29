@@ -21,7 +21,7 @@ import time
 import pandas as pd
 import numpy as np
 from collections import deque
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 from models.base_model import BaseTimeSeriesModel
 
@@ -62,9 +62,13 @@ def compute_threshold_from_errors(
 def _format_timestamp_local(timestamp_seconds: float) -> str:
     """Format Unix timestamp to local HH:MM:SS string, matching system timezone."""
     import time as time_module
-    # Use time.localtime() to ensure local timezone (matching pandas behavior)
-    local_time = time_module.localtime(timestamp_seconds)
-    return time_module.strftime('%H:%M:%S', local_time)
+    if timestamp_seconds == float('inf') or timestamp_seconds > 1e10:
+        return 'indefinite'
+    try:
+        local_time = time_module.localtime(timestamp_seconds)
+        return time_module.strftime('%H:%M:%S', local_time)
+    except (OverflowError, ValueError):
+        return 'indefinite'
 
 
 class UniversalForecaster:
@@ -87,7 +91,6 @@ class UniversalForecaster:
         retrain_consec: int = 2,
         retrain_cooldown: int = 0,
         # Backoff behaviour when retraining happens too rapidly
-        backoff_short_seconds: int = 15,
         backoff_long_seconds: int = 30,
         # If retrains happen faster than this (seconds), treat as "rapid" and apply backoff
         retrain_rapid_seconds: int = 2,
@@ -112,7 +115,6 @@ class UniversalForecaster:
             retrain_use_mad: Use MAD (robust) vs std
             retrain_consec: Consecutive violations to trigger retrain
             retrain_cooldown: Minimum steps between retrains
-            backoff_short_seconds: Seconds before hidden short attempt when rapid retrain detected
             backoff_long_seconds: Base seconds for backoff window and retrain scheduling
             retrain_rapid_seconds: Wall-clock seconds - retrains faster than this trigger backoff
             backoff_max_retrains: Max retrains during backoff before forcing extension
@@ -130,7 +132,6 @@ class UniversalForecaster:
         self.retrain_use_mad = retrain_use_mad
         self.retrain_consec = retrain_consec
         self.retrain_cooldown = retrain_cooldown
-        self.backoff_short_seconds = backoff_short_seconds
         self.backoff_long_seconds = backoff_long_seconds
         self.retrain_rapid_seconds = retrain_rapid_seconds
         self.backoff_max_retrains = backoff_max_retrains
@@ -160,25 +161,19 @@ class UniversalForecaster:
         self.pending_validations = deque(maxlen=100)
         self.recent_predictions = deque(maxlen=max(1, int(prediction_smoothing)))
 
-        # Hidden/backoff tracking (predictions and scheduled retrains that are not visible to users)
-        # Each hidden pending validation: (creation_step, pred_values, attempt_type)
+    # Hidden/backoff tracking (predictions that are not visible to users during backoff)
+        # Each hidden pending validation: (creation_step, creation_ts, pred_values, attempt_type)
         self.hidden_pending_validations = deque(maxlen=100)
-        # Times when we should generate a hidden prediction (wall-clock timestamps)
-        # "short" maps to a timestamp (float seconds since epoch) or None
-        self.scheduled_hidden_generation = {
-            "short": None,
-        }
-        # If a retrain is scheduled due to failed short attempt, this stores the timestamp to execute it
+        # If a retrain is scheduled during backoff, this stores the timestamp to execute it
         self.backoff_retrain_scheduled_time = None
         # Track wall-clock time of last retrain to detect rapid retraining
         self.last_retrain_time = 0.0
-        # If a backoff is active, block returning user-facing predictions until this timestamp
-        self.user_prediction_block_until = 0.0
         # Internal backoff bookkeeping
         # Collected mean_horizon_errors for suppressed predictions during the active backoff
         self._suppressed_errors = []
         # Consecutive OK suppressed validations (used to decide when to clear backoff)
         self._consecutive_ok_suppressed = 0
+        self._consecutive_error_suppressed = 0
         # Number of retrains executed while the current backoff is active
         self._retrain_count_since_backoff_start = 0
         # Whether a backoff window is currently active (set via _start_backoff)
@@ -228,47 +223,39 @@ class UniversalForecaster:
             Smoothed predictions (list of floats)
         """
         # If we're currently in a backoff window, suppress user-facing predictions
-        if time.time() < getattr(self, 'user_prediction_block_until', 0.0):
+        if self._backoff_active:
             # Allow model update (online learning) but do not call predict or append pending validations
             if self.model.supports_online_learning():
                 try:
                     self.model.update(live_data)
                 except Exception as e:
-                    # Log update failure in backoff log for diagnostics
-                    self._append_backoff_log(self.model.get_model_name(), "online_update_failed",
-                                             f"err={e}")
-            # Print backoff suppression once when first entering backoff
+                    self._append_backoff_log(self.model.get_model_name(), "online_update_failed", f"err={e}")
             if not self.quiet and not self._backoff_announced:
-                until_str = _format_timestamp_local(self.user_prediction_block_until)
-                self._append_backoff_log(self.model.get_model_name(), "suppress_predictions",
-                                         f"until={until_str}")
+                self._append_backoff_log(self.model.get_model_name(), "suppress_predictions", "indefinite")
                 self._backoff_announced = True
-            # Still generate a prediction (silent) and keep it for validation/logging
             try:
                 raw_preds = self.model.predict()
                 if raw_preds:
                     raw_preds = [max(-1e9, min(1e9, float(p))) if np.isfinite(p) else 0.0 for p in raw_preds]
                 else:
                     raw_preds = []
-                # Store with creation timestamp for later validation
                 creation_ts = live_data.index[-1]
+                # Keep last hidden prediction for this creation timestamp
+                try:
+                    self.hidden_pending_validations = deque([h for h in self.hidden_pending_validations if h[1] != creation_ts], maxlen=self.hidden_pending_validations.maxlen)
+                except Exception:
+                    newdq = deque(maxlen=100)
+                    for h in list(self.hidden_pending_validations):
+                        if h[1] != creation_ts:
+                            newdq.append(h)
+                    self.hidden_pending_validations = newdq
                 self.hidden_pending_validations.append((self.step, creation_ts, raw_preds, "suppressed"))
-                # still increment step for time progression
                 self.step += 1
-                # Return the suppressed predictions so they can be displayed (in red) on the UI
                 return raw_preds
             except Exception as e:
                 self._append_backoff_log(self.model.get_model_name(), "suppressed_prediction_failed", f"err={e}")
-                # still increment step for time progression
                 self.step += 1
                 return []
-
-        # Possibly generate scheduled hidden predictions first (backoff short attempts)
-        try:
-            self._generate_hidden_prediction_if_due(live_data)
-        except Exception as e:
-            # Fail silently but record in backoff log
-            self._append_backoff_log(self.model.get_model_name(), "hidden_generation_error", f"err={e}")
 
         # Update model with new data (online learning if supported)
         if self.model.supports_online_learning():
@@ -310,10 +297,21 @@ class UniversalForecaster:
         else:
             preds = []
         
-        # Store for validation
+        # Store for validation - keep only the LAST prediction for a given creation timestamp
         if preds:
-            last_actual_ts = live_data.index[-1]
+            # Normalize creation timestamp to whole seconds for consistent matching/validation
+            last_actual_ts = live_data.index[-1].floor('S')
             pred_values = [float(p) for p in preds]
+            # Remove any existing pending validation with same creation timestamp
+            try:
+                self.pending_validations = deque([pv for pv in self.pending_validations if pv[1] != last_actual_ts], maxlen=self.pending_validations.maxlen)
+            except Exception:
+                # Fallback: clear same-timestamp entries by rebuilding
+                newdq = deque(maxlen=100)
+                for pv in list(self.pending_validations):
+                    if pv[1] != last_actual_ts:
+                        newdq.append(pv)
+                self.pending_validations = newdq
             self.pending_validations.append((self.step, last_actual_ts, pred_values))
         
         self.step += 1
@@ -330,176 +328,51 @@ class UniversalForecaster:
         ts = _format_timestamp_local(time.time())
         print(f"[{ts}] BOFF {action}: {details}")
 
-    def _generate_hidden_prediction_if_due(self, live_data: pd.Series) -> None:
-        """Generate hidden (non-user-facing) predictions if a scheduled short attempt is due.
-
-        These predictions are stored in `hidden_pending_validations` and validated later
-        by the same machinery as visible predictions, but they are only logged and never
-        returned to users.
-        """
-        # If a short attempt was scheduled for this step, generate it now
-        sched = self.scheduled_hidden_generation.get("short")
-        if sched is None:
-            return
-        if time.time() < sched:
-            return
-
-        # Time to create the hidden prediction
-        try:
-            if not self.model.is_trained:
-                # Can't generate hidden prediction without a trained model
-                self.scheduled_hidden_generation["short"] = None
-                return
-
-            raw_preds = self.model.predict()
-            if raw_preds:
-                raw_preds = [
-                    max(-1e9, min(1e9, float(p))) if np.isfinite(p) else 0.0
-                    for p in raw_preds
-                ]
-            else:
-                raw_preds = []
-
-            # Store as a hidden pending validation with creation timestamp
-            # Use negative step to avoid collision with visible predictions
-            creation_ts = live_data.index[-1]
-            self.hidden_pending_validations.append((-self.step, creation_ts, raw_preds, "short"))
-            sched_str = _format_timestamp_local(sched)
-            self._append_backoff_log(self.model.get_model_name(), "hidden_pred_generated",
-                                     f"scheduled_for_time={sched_str}, created_at_step={self.step}")
-        except Exception as e:
-            # ignore generation errors but log for debugging
-            self._append_backoff_log(self.model.get_model_name(), "hidden_pred_failed",
-                                     f"err={e}")
-        finally:
-            # Clear scheduled short generation so it doesn't repeat
-            self.scheduled_hidden_generation["short"] = None
-
     def _start_backoff(self, until_ts: float) -> None:
-        """Begin a backoff window that blocks user-facing predictions until `until_ts`.
+        """Begin a backoff window that blocks user-facing predictions indefinitely until enough consecutive OKs are observed.
 
         Initializes suppressed-error accumulation and retrain counter.
         Clears pending visible validations to prevent them from printing during backoff.
         """
-        self.user_prediction_block_until = float(until_ts)
+    # No longer use user_prediction_block_until for time-based blocking
         self._backoff_active = True
         self._suppressed_errors = []
         self._retrain_count_since_backoff_start = 0
         self._backoff_announced = False
-        # Clear any pending visible predictions - they shouldn't validate during backoff
         self.pending_validations.clear()
-        
-        # Print a clear message when entering backoff
         if not self.quiet:
-            until_str = _format_timestamp_local(until_ts)
-            duration = until_ts - time.time()
             print(f"\n{'='*70}")
-            print(f"[BACKOFF] Entering prediction suppression mode until {until_str}")
-            print(f"[BACKOFF] Duration: {duration:.1f}s - Predictions will be generated but suppressed")
+            print(f"[BACKOFF] Entering prediction suppression mode (indefinite)")
+            print(f"[BACKOFF] Predictions will be generated but suppressed until enough consecutive OKs are observed.")
             print(f"[BACKOFF] Reason: Rapid retraining detected (model unstable)")
             print(f"{'='*70}\n")
 
     def _maybe_finish_backoff(self, threshold: Optional[float]) -> None:
-        """When a backoff window expires, decide whether to resume predictions or extend backoff.
+        """Evaluate backoff conditions and decide whether to clear backoff or keep it active.
 
-        Decision rule: if the average suppressed error during the backoff > threshold OR the
-        number of retrains during backoff >= backoff_max_retrains OR we don't have enough
-        consecutive OK suppressed validations, extend backoff (exponential using backoff_fail_count).
-        Otherwise clear the backoff and resume predictions.
+        Decision rule: if we have enough consecutive OK suppressed validations, clear backoff.
+        Otherwise keep backoff active indefinitely (no time-based expiration).
+        
+        Note: Backoff does NOT expire on its own - it only clears when conditions are met.
         """
         if not getattr(self, '_backoff_active', False):
             return
 
-        now = time.time()
-        if now < getattr(self, 'user_prediction_block_until', 0.0):
-            return
-
-        # Compute aggregate error for suppressed preds (fall back to recent visible errors)
-        avg_error = None
-        if len(self._suppressed_errors) > 0:
-            try:
-                avg_error = float(np.mean(self._suppressed_errors))
-            except Exception as e:
-                self._append_backoff_log(self.model.get_model_name(), "suppressed_error_mean_failed", f"err={e}")
-                avg_error = None
-
-        if avg_error is None:
-            # If we have no suppressed-error samples, use recent visible error average if available
-            try:
-                avg_error = float(np.mean(list(self.recent_errors))) if len(self.recent_errors) else None
-            except Exception as e:
-                self._append_backoff_log(self.model.get_model_name(), "avg_error_compute_failed", f"err={e}")
-                avg_error = None
-
-        # Ensure we have a threshold to compare to
-        if threshold is None:
-            threshold = float(self.retrain_min)
-
-        # Decide whether to extend: either avg_error > threshold, too many retrains, 
-        # or not enough consecutive OK suppressed validations
-        # Priority: if we have enough consecutive OKs, clear backoff regardless of average
-        extend = False
+        # Only clear backoff if enough consecutive OKs
         required_ok = getattr(self, 'backoff_clear_consecutive_ok', 3)
-        
         if self._consecutive_ok_suppressed >= required_ok:
-            # We have enough consecutive OKs - clear backoff
-            extend = False
-        elif avg_error is not None and avg_error > float(threshold):
-            extend = True
-        elif self._retrain_count_since_backoff_start >= getattr(self, 'backoff_max_retrains', 2):
-            extend = True
-        else:
-            # Not enough consecutive OKs
-            extend = True
-
-        if extend:
-            # escalate using backoff_fail_count and cap to 30 seconds
-            self.backoff_fail_count += 1
-            multiplier = 2 ** (max(0, self.backoff_fail_count - 1))
-            proposed = now + float(self.backoff_long_seconds) * multiplier
-            max_cap = now + 30.0
-            scheduled = min(proposed, max_cap)
-            self.user_prediction_block_until = scheduled
-            sched_str = _format_timestamp_local(scheduled)
-            avg_err_str = f"{avg_error:.3f}" if avg_error is not None else "N/A"
-            
-            # Print clear extension message
-            if not self.quiet:
-                duration = scheduled - now
-                print(f"\n{'='*70}")
-                print(f"[BACKOFF] Extended until {sched_str} (+{duration:.1f}s)")
-                print(f"[BACKOFF] Avg Error: {avg_err_str}% | Threshold: {threshold:.3f}%")
-                print(f"[BACKOFF] Retrains: {self._retrain_count_since_backoff_start} | OK Streak: {self._consecutive_ok_suppressed}/{required_ok}")
-                print(f"{'='*70}\n")
-            
-            self._append_backoff_log(
-                self.model.get_model_name(),
-                'extend_backoff_after_evaluation',
-                f'avg_err={avg_err_str}%, thr={threshold:.3f}%, retrains={self._retrain_count_since_backoff_start}, ok_consec={self._consecutive_ok_suppressed}/{required_ok}, extend_until={sched_str}'
-            )
-            # reset suppressed errors accumulation for next window
-            self._suppressed_errors = []
-            # Don't reset consecutive OK counter - let it accumulate across evaluation windows
-            # self._consecutive_ok_suppressed = 0
-            # Clear any pending visible predictions - they shouldn't validate during extended backoff
-            self.pending_validations.clear()
-        else:
-            # clear backoff and resume predictions
             self.backoff_fail_count = 0
-            self.user_prediction_block_until = time.time()
+            # No longer use user_prediction_block_until for time-based blocking
             self._backoff_active = False
-            
-            # Print clear resume message
             if not self.quiet:
                 print(f"\n{'='*70}")
                 print(f"[BACKOFF] Cleared - Resuming normal predictions")
-                print(f"[BACKOFF] Reason: Performance stabilized (OK Streak: {self._consecutive_ok_suppressed}/{required_ok})")
+                print(f"[BACKOFF] Reason: {self._consecutive_ok_suppressed} consecutive OK validations (required: {required_ok})")
                 print(f"{'='*70}\n")
-            avg_err_str = f"{avg_error:.3f}" if avg_error is not None else "N/A"
-            self._append_backoff_log(self.model.get_model_name(), 'backoff_cleared_by_evaluation',
-                                     f'avg_err={avg_err_str}%, retrains={self._retrain_count_since_backoff_start}, ok_consec={self._consecutive_ok_suppressed}')
             self._suppressed_errors = []
             self._consecutive_ok_suppressed = 0
+        # Always clear pending visible predictions during backoff
+        self.pending_validations.clear()
 
     def _validate_hidden_predictions(self, live_data: pd.Series, threshold: Optional[float]) -> None:
         """Validate ONE hidden pending prediction if ready and log results.
@@ -602,7 +475,7 @@ class UniversalForecaster:
                     self._append_backoff_log(self.model.get_model_name(), "timestamp_format_err", f"err={e}")
                     ts_str = ''
                 thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
-                print(f"[{ts_str}] SUPP s={creation_step} err={mean_horizon_error:.3f}% thr={thr_str}%")
+                print(f"[{ts_str}] [B] SUPP s={creation_step} err={mean_horizon_error:.3f}% thr={thr_str}%")
                 if mean_horizon_error > 500.0:
                     print(f"[WARN] Extreme suppressed err={mean_horizon_error:.3f}% s={creation_step}")
 
@@ -618,7 +491,6 @@ class UniversalForecaster:
                 if self._consecutive_ok_suppressed >= required_ok and getattr(self, '_backoff_active', False):
                     # Clear backoff immediately
                     self.backoff_fail_count = 0
-                    self.user_prediction_block_until = time.time()
                     self._backoff_active = False
                     
                     # Print clear resume message
@@ -678,7 +550,17 @@ class UniversalForecaster:
                     raw_preds = []
                 # store as hidden pending validation with creation timestamp and attempt type 'post_retrain'
                 # Use negative step to avoid collision with visible predictions
-                creation_ts = live_data.index[-1]
+                # Normalize creation timestamp to whole seconds for consistent matching/validation
+                creation_ts = live_data.index[-1].floor('S')
+                # Keep last hidden prediction for this creation timestamp (post retrain)
+                try:
+                    self.hidden_pending_validations = deque([h for h in self.hidden_pending_validations if h[1] != creation_ts], maxlen=self.hidden_pending_validations.maxlen)
+                except Exception:
+                    newdq = deque(maxlen=100)
+                    for h in list(self.hidden_pending_validations):
+                        if h[1] != creation_ts:
+                            newdq.append(h)
+                    self.hidden_pending_validations = newdq
                 self.hidden_pending_validations.append((-self.step, creation_ts, raw_preds, "post_retrain"))
                 self._append_backoff_log(self.model.get_model_name(), "hidden_pred_post_retrain",
                                          f"created_at_step={self.step}")
@@ -701,26 +583,25 @@ class UniversalForecaster:
         # Check both queues and pick the oldest one by creation timestamp
         visible_ready = None
         hidden_ready = None
-        
+
         # Check visible queue (but skip if we're currently in backoff)
-        in_backoff = time.time() < getattr(self, 'user_prediction_block_until', 0.0)
-        if self.pending_validations and not in_backoff:
+        if self.pending_validations and not self._backoff_active:
             creation_step, creation_ts, pred_values = self.pending_validations[0]
             steps_elapsed = self.step - creation_step
             if steps_elapsed >= self.model.horizon:
                 visible_ready = (creation_step, creation_ts, pred_values, "visible")
-        
+
         # Check hidden queue
         if self.hidden_pending_validations:
             creation_step, creation_ts, pred_values, attempt_type = self.hidden_pending_validations[0]
             steps_elapsed = self.step - creation_step
             if steps_elapsed >= self.model.horizon:
                 hidden_ready = (creation_step, creation_ts, pred_values, attempt_type)
-        
+
         # If nothing is ready, return None
         if visible_ready is None and hidden_ready is None:
             return None
-        
+
         # Pick the oldest one by timestamp
         if visible_ready is not None and hidden_ready is not None:
             # Both ready - pick older timestamp
@@ -892,7 +773,7 @@ class UniversalForecaster:
                 self._append_backoff_log(self.model.get_model_name(), "timestamp_format_failed", f"err={e}")
                 ts_str = ''
             thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
-            print(f"[{ts_str}] VAL s={self.step} err={mean_horizon_error:.3f}% thr={thr_str}%")
+            print(f"[{ts_str}] [P] VAL s={self.step} err={mean_horizon_error:.3f}% thr={thr_str}%")
         
         # Store for final statistics
         for actual, pred in zip(horizon_actuals, horizon_preds):
@@ -933,36 +814,8 @@ class UniversalForecaster:
         else:
             threshold = float(self.retrain_min)
         
-        if attempt_type == "short" and threshold is not None:
-            # For short attempts, schedule retrain if error > threshold
-            # Print the short attempt validation result
-            if not self.quiet:
-                try:
-                    # Use current time (when validation happens) for real-time heartbeat
-                    import time as time_module
-                    ts_str = time_module.strftime('%H:%M:%S', time_module.localtime())
-                except Exception as e:
-                    self._append_backoff_log(self.model.get_model_name(), "timestamp_format_err", f"err={e}")
-                    ts_str = ''
-                thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
-                print(f"[{ts_str}] SHORT err={mean_horizon_error:.3f}% thr={thr_str}%")
-            
-            if mean_horizon_error > threshold:
-                self.backoff_fail_count += 1
-                multiplier = 2 ** (max(0, self.backoff_fail_count - 1))
-                now = time.time()
-                proposed = now + float(self.backoff_long_seconds) * multiplier
-                max_cap = now + 30.0
-                scheduled = min(proposed, max_cap)
-                self.backoff_retrain_scheduled_time = scheduled
-                sched_str = _format_timestamp_local(scheduled)
-                self._append_backoff_log(
-                    self.model.get_model_name(),
-                    "schedule_retrain_after_backoff",
-                    f"retrain_at={sched_str}, lvl={self.backoff_fail_count}, mult={multiplier}"
-                )
-                self._backoff_announced = False
-        elif attempt_type == "suppressed" or attempt_type == "post_retrain":
+        
+        if attempt_type == "suppressed" or attempt_type == "post_retrain":
             # Print validation summary for suppressed predictions
             if not self.quiet:
                 try:
@@ -975,7 +828,7 @@ class UniversalForecaster:
                 thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
                 # Don't print step number for hidden predictions to avoid confusion with visible predictions
                 type_label = "SUPP" if attempt_type == "suppressed" else "POST"
-                print(f"[{ts_str}] {type_label} err={mean_horizon_error:.3f}% thr={thr_str}%")
+                print(f"[{ts_str}] [B] {type_label} err={mean_horizon_error:.3f}% thr={thr_str}%")
                 if mean_horizon_error > 500.0:
                     print(f"[WARN] Extreme suppressed err={mean_horizon_error:.3f}%")
             
@@ -993,7 +846,7 @@ class UniversalForecaster:
                     if self._consecutive_ok_suppressed >= required_ok and getattr(self, '_backoff_active', False):
                         # Clear backoff immediately
                         self.backoff_fail_count = 0
-                        self.user_prediction_block_until = time.time()
+                        # No longer use user_prediction_block_until for time-based blocking
                         self._backoff_active = False
                         
                         # Print clear resume message
@@ -1012,33 +865,32 @@ class UniversalForecaster:
                         self._consecutive_ok_suppressed = 0
                     
                     # Reset consecutive error counter on success
-                    if not hasattr(self, '_consecutive_error_suppressed'):
-                        self._consecutive_error_suppressed = 0
-                    else:
-                        self._consecutive_error_suppressed = 0
+                    self._consecutive_error_suppressed = 0
                 else:
                     # Reset consecutive OK counter on error
                     self._consecutive_ok_suppressed = 0
                     # Track consecutive errors during backoff
-                    if not hasattr(self, '_consecutive_error_suppressed'):
-                        self._consecutive_error_suppressed = 1
-                    else:
-                        self._consecutive_error_suppressed += 1
+                    self._consecutive_error_suppressed += 1
                     
-                    # If we get multiple consecutive bad suppressed predictions, schedule a retrain
+                    # If we get multiple consecutive bad suppressed predictions, trigger retrain immediately
                     # Use same threshold as normal retraining (retrain_consec)
                     if self._consecutive_error_suppressed >= self.retrain_consec:
-                        # Schedule a retrain during backoff
-                        now = time.time()
-                        scheduled = now + float(self.backoff_long_seconds)
-                        self.backoff_retrain_scheduled_time = scheduled
-                        sched_str = _format_timestamp_local(scheduled)
-                        self._append_backoff_log(
-                            self.model.get_model_name(),
-                            "schedule_retrain_from_suppressed",
-                            f"consec_err={self._consecutive_error_suppressed}, retrain_at={sched_str}"
-                        )
-                        self._consecutive_error_suppressed = 0  # Reset after scheduling
+                        try:
+                            retrain_time = self.model.train(live_data)
+                            self.training_times.append(retrain_time)
+                            self.last_retrain_step = self.step
+                            prev_retrain_time = self.last_retrain_time
+                            self.last_retrain_time = time.time()
+                            if not self.quiet:
+                                print(f"[SUPP] Retrain s={self.step} t={retrain_time:.3f}s (backoff mode)")
+                                print(f"[Baseline] Updated - Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}")
+                        except Exception:
+                            if not self.quiet:
+                                print(f"[SUPP] Retrain failed")
+                        finally:
+                            self.errors.clear()
+                            self.recent_errors.clear()
+                            self._consecutive_error_suppressed = 0  # Reset after retrain
         
         return mean_horizon_error
     
@@ -1082,15 +934,10 @@ class UniversalForecaster:
                 # After retrain completes, check if it was rapid and trigger backoff
                 if rapid_retrain_detected:
                     elapsed = now - prev_retrain_time
-                    # Schedule hidden short prediction at now + backoff_short_seconds
-                    scheduled_time = time.time() + float(self.backoff_short_seconds)
-                    self.scheduled_hidden_generation["short"] = scheduled_time
-                    # Initialize backoff bookkeeping and block user predictions for the backoff window
+                    # Initialize backoff bookkeeping
                     self._start_backoff(time.time() + float(self.backoff_long_seconds))
-                    sched_str = _format_timestamp_local(scheduled_time)
-                    block_str = _format_timestamp_local(self.user_prediction_block_until)
                     self._append_backoff_log(self.model.get_model_name(), "rapid_retrain_backoff",
-                                             f"elapsed={elapsed:.1f}s, sched={sched_str}, block_until={block_str}")
+                                             f"elapsed={elapsed:.1f}s, block=indefinite")
                     
             except Exception as e:
                 if not self.quiet:

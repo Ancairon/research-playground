@@ -89,7 +89,7 @@ def main():
     # Model parameters
     parser.add_argument('--horizon', type=int, default=5, help='Forecast horizon (steps ahead)')
     parser.add_argument('--window', type=int, default=25, help='Inference window size (for predictions)')
-    parser.add_argument('--train-window', type=int, default=500, help='Initial training window size (defaults to --window)')
+    parser.add_argument('--train-window', type=int, default=100, help='Initial training window size (defaults to --window)')
     parser.add_argument('--random-state', type=int, default=42, help='Random seed')
     
     
@@ -106,7 +106,6 @@ def main():
     
     # Backoff parameters
     parser.add_argument('--retrain-rapid-seconds', type=int, default=10, help='Wall-clock seconds - retrains faster than this trigger backoff')
-    parser.add_argument('--backoff-short-seconds', type=int, default=10, help='Seconds before hidden short attempt')
     parser.add_argument('--backoff-long-seconds', type=int, default=15, help='Base seconds for backoff window')
     parser.add_argument('--backoff-max-retrains', type=int, default=5, help='Max retrains during backoff before extension')
     parser.add_argument('--backoff-clear-consecutive-ok', type=int, default=3, help='Consecutive OK suppressed validations needed to clear backoff')
@@ -171,7 +170,6 @@ def main():
         retrain_consec=args.retrain_consec,
         retrain_cooldown=args.retrain_cooldown,
         retrain_rapid_seconds=args.retrain_rapid_seconds,
-        backoff_short_seconds=args.backoff_short_seconds,
         backoff_long_seconds=args.backoff_long_seconds,
         backoff_max_retrains=args.backoff_max_retrains,
         backoff_clear_consecutive_ok=args.backoff_clear_consecutive_ok,
@@ -246,24 +244,23 @@ def main():
             # Forecast
             predictions = forecaster.forecast_step(live_df)
             
-            # Send to live server
+            # Validate all ready predictions in chronological order
+            # This MUST happen before sending to UI because validation can extend/clear backoff
+            while True:
+                validated = forecaster.validate_predictions(live_df)
+                if validated is None:
+                    break  # No more ready predictions
+            
+            # Send to live server AFTER validation (so backoff state is up-to-date)
             if not args.no_live_server and not args.csv:
-                # Check if we're currently in backoff
-                in_backoff = time.time() < getattr(forecaster, 'user_prediction_block_until', 0.0)
-                
-                # Get current actual value for plotting
+                # Use only _backoff_active for backoff state
+                in_backoff = getattr(forecaster, '_backoff_active', False)
                 current_value = float(live_df.iloc[-1]) if len(live_df) > 0 else 0
-                
-                # Debug: print backoff status
-                if not args.quiet and in_backoff:
-                    print(f"[DEBUG] Sending BACKOFF=True to UI, preds={len(predictions)}")
-                
-                # Always send predictions (will be shown as red during backoff, purple otherwise)
                 try:
                     requests.post(
                         f'http://localhost:{args.live_server_port}/predictions',
                         json={
-                            'predictions': predictions,  # Send predictions always (suppressed or normal)
+                            'predictions': predictions,
                             'context': args.context,
                             'dimension': args.dimension,
                             'timestamp': live_df.index[-1].isoformat(),
@@ -274,12 +271,6 @@ def main():
                     )
                 except Exception:
                     pass
-            
-            # Validate all ready predictions in chronological order
-            while True:
-                validated = forecaster.validate_predictions(live_df)
-                if validated is None:
-                    break  # No more ready predictions
             
             # Sleep to maintain consistent intervals (only in live mode)
             if not args.csv:

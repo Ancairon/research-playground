@@ -159,11 +159,11 @@
       </div>
       <div class="legend-item">
         <span class="legend-box" style="background: #9C27B0; border: 2px dashed #9C27B0; height: 0;"></span>
-        <span>Predictions (ML)</span>
+        <span>Normal Predictions (ML)</span>
       </div>
       <div class="legend-item">
-        <span class="legend-box" style="background: #F44336;"></span>
-        <span>Backoff (Suppressed)</span>
+        <span class="legend-box" style="background: #F44336; border: 2px dashed #F44336; height: 0;"></span>
+        <span>Suppressed Predictions (Backoff)</span>
       </div>
     </div>
   </div>
@@ -173,6 +173,7 @@
     let updateTimer;
     let historicalData = [];
     let predictedData = [];
+    let predictionHistory = []; // Store all past predictions with their timestamps
 
     function showStatus(message, type = 'info') {
       const status = document.getElementById('status');
@@ -297,8 +298,39 @@
         
         predictedData = mlData.predictions.map((val, i) => ({
           timestamp: lastTimestamp + (i + 1) * interval,
-          value: val
+          value: val,
+          backoff: mlData.backoff
         }));
+        
+        // Store prediction for the CURRENT moment (what we predict right now)
+        // This is key: at timestamp T, we make predictions for T+1, T+2, etc.
+        // But we want to show a dot at T representing "the prediction made at this time"
+        // Use the first prediction (T+1) as representative of what we predicted "now"
+        if (mlData.predictions.length > 0) {
+          const currentPred = {
+            timestamp: lastTimestamp,  // This is the current time
+            value: mlData.predictions[0],  // What we predict for next moment
+            backoff: mlData.backoff,
+            madeAt: lastTimestamp
+          };
+          
+          // Remove any existing prediction for this timestamp (regardless of backoff state)
+          // We only want ONE prediction per timestamp - the most recent one
+          predictionHistory = predictionHistory.filter(p => p.timestamp !== currentPred.timestamp);
+          
+          // Add the new prediction
+          predictionHistory.push(currentPred);
+          console.log('[DEBUG] Added prediction:', {
+            timestamp: new Date(currentPred.timestamp).toLocaleTimeString(),
+            value: currentPred.value.toFixed(2),
+            backoff: currentPred.backoff,
+            totalHistory: predictionHistory.length
+          });
+        }
+        
+        // Keep only predictions that are within our display window
+        const oldestTimestamp = netdataData[0].timestamp;
+        predictionHistory = predictionHistory.filter(p => p.timestamp >= oldestTimestamp);
 
         // Update chart
         renderChart();
@@ -315,14 +347,21 @@
     function renderChart() {
       const ctx = document.getElementById('liveChart');
       
-      // Prepare labels and datasets
-      const allTimestamps = [
-        ...historicalData.map(d => d.timestamp),
-        ...predictedData.map(d => d.timestamp)
-      ];
+  // Normalize timestamps to whole seconds to ensure exact alignment between API metrics and predictions
+  const normalize = ts => Math.floor(ts / 1000) * 1000;
+
+  // Get all timestamps from historical data (normalized)
+  const allTimestamps = historicalData.map(d => normalize(d.timestamp));
+
+  // Compute future timestamps for the prediction horizon (aligned with historical interval)
+  const futureTimestamps = predictedData.length > 0 ? predictedData.map(p => normalize(p.timestamp)) : [];
+
+  // Full label timeline = historical + future, deduped and sorted
+  const fullTimestampsSet = new Set(allTimestamps.concat(futureTimestamps));
+  const fullTimestamps = Array.from(fullTimestampsSet).sort((a, b) => a - b);
       
       // Use readable time format with seconds to show progression
-      const labels = allTimestamps.map(ts => {
+      const labels = fullTimestamps.map(ts => {
         const date = new Date(ts);
         return date.toLocaleTimeString('en-US', { 
           hour: '2-digit', 
@@ -332,43 +371,61 @@
         });
       });
       
+      // Build actual data values
       const historicalValues = historicalData.map(d => d.value);
-      const historicalNulls = Array(predictedData.length).fill(null);
+
+      // Build a map from normalized historical timestamp -> value for quick lookup
+      const histMap = new Map();
+      historicalData.forEach(d => histMap.set(normalize(d.timestamp), d.value));
+
+      // For chart we need arrays matching fullTimestamps length. For historical part, fill values; for future, use nulls.
+      const fullHistoricalValues = fullTimestamps.map(ts => histMap.has(ts) ? histMap.get(ts) : null);
       
-      // For predictions, prepend the last historical value to connect the lines
-      const lastHistoricalValue = historicalData.length > 0 
-        ? historicalData[historicalData.length - 1].value 
-        : null;
-      const predictionNulls = Array(historicalData.length - 1).fill(null);
+      // Build quick lookup maps for past predictions and future predictedData (normalized)
+      const pastPredMap = new Map();
+      predictionHistory.forEach(p => pastPredMap.set(normalize(p.timestamp), p));
+      const futurePredMap = new Map();
+      predictedData.forEach(p => futurePredMap.set(normalize(p.timestamp), p));
+
+      const normalPredictions = fullTimestamps.map(ts => {
+        const past = pastPredMap.get(ts);
+        if (past && !past.backoff) return past.value;
+        const fut = futurePredMap.get(ts);
+        return fut && !fut.backoff ? fut.value : null;
+      });
+
+      const suppressedPredictions = fullTimestamps.map(ts => {
+        const past = pastPredMap.get(ts);
+        if (past && past.backoff) return past.value;
+        const fut = futurePredMap.get(ts);
+        return fut && fut.backoff ? fut.value : null;
+      });
       
-      // Check if we're in backoff mode from the latest historical data point
-      const inBackoff = historicalData.length > 0 && historicalData[historicalData.length - 1].backoff;
-      
-      console.log('[DEBUG] Backoff state:', inBackoff, 'Predictions:', predictedData.length);
-      
-      // Build prediction arrays based on backoff state
-      let normalPredictions, suppressedPredictions;
-      
-      if (inBackoff) {
-        // In backoff: show red line, hide purple line
-        normalPredictions = [...predictionNulls, ...Array(predictedData.length + 1).fill(null)];
-        suppressedPredictions = [...predictionNulls, lastHistoricalValue, ...predictedData.map(d => d.value)];
-      } else {
-        // Normal mode: show purple line, hide red line
-        normalPredictions = [...predictionNulls, lastHistoricalValue, ...predictedData.map(d => d.value)];
-        suppressedPredictions = [...predictionNulls, ...Array(predictedData.length + 1).fill(null)];
-      }
+      console.log('[DEBUG] Render:', {
+        historyLength: predictionHistory.length,
+        normalCount: normalPredictions.filter(p => p !== null).length,
+        suppressedCount: suppressedPredictions.filter(p => p !== null).length,
+        timestampRange: allTimestamps.length > 0 ? [
+          new Date(allTimestamps[0]).toLocaleTimeString(),
+          new Date(allTimestamps[allTimestamps.length - 1]).toLocaleTimeString()
+        ] : [],
+        predictionTimestamps: predictionHistory.slice(-5).map(p => ({
+          time: new Date(p.timestamp).toLocaleTimeString(),
+          value: p.value.toFixed(2),
+          backoff: p.backoff
+        }))
+      });
 
       if (!chart) {
         // Create chart on first render
         chart = new Chart(ctx, {
           type: 'line',
           data: {
-            labels: labels,
-            datasets: [
+              labels: labels,
+              datasets: [
               {
                 label: 'Actual (Metrics)',
-                data: [...historicalValues, ...historicalNulls],
+                  data: fullHistoricalValues,
                 borderColor: '#00AB44',
                 backgroundColor: 'rgba(0, 171, 68, 0.1)',
                 borderWidth: 2,
@@ -383,6 +440,8 @@
                 borderWidth: 3,
                 borderDash: [5, 5],
                 pointRadius: 0,
+                pointBackgroundColor: '#9C27B0',
+                pointBorderColor: '#9C27B0',
                 tension: 0.1
               },
               {
@@ -393,6 +452,8 @@
                 borderWidth: 3,
                 borderDash: [5, 5],
                 pointRadius: 0,
+                pointBackgroundColor: '#F44336',
+                pointBorderColor: '#F44336',
                 tension: 0.1
               }
             ]
@@ -435,7 +496,7 @@
       } else {
         // Update existing chart data in place
         chart.data.labels = labels;
-        chart.data.datasets[0].data = [...historicalValues, ...historicalNulls];
+        chart.data.datasets[0].data = historicalValues;
         chart.data.datasets[1].data = normalPredictions;
         chart.data.datasets[2].data = suppressedPredictions;
         
