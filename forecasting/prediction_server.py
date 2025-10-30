@@ -55,7 +55,8 @@ def receive_predictions():
             'metadata': {
                 'context': data.get('context'),
                 'dimension': data.get('dimension'),
-                'horizon': len(data.get('predictions', []))
+                'horizon': len(data.get('predictions', [])),
+                'prediction_interval': data.get('prediction_interval')
             }
         }
         

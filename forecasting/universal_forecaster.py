@@ -313,6 +313,14 @@ class UniversalForecaster:
                         newdq.append(pv)
                 self.pending_validations = newdq
             self.pending_validations.append((self.step, last_actual_ts, pred_values))
+
+            # Print predictions and their corresponding UTC seconds
+            try:
+                pred_times = [last_actual_ts + pd.Timedelta(seconds=i+1) for i in range(len(pred_values))]
+                pred_times_str = [t.strftime('%H:%M:%S') for t in pred_times]
+                print(f"[PREDICT] step={self.step} preds=" + ', '.join(f"{v:.3f}@{t}" for v, t in zip(pred_values, pred_times_str)))
+            except Exception as e:
+                print(f"[PREDICT] print error: {e}")
         
         self.step += 1
         return preds

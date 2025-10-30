@@ -238,7 +238,9 @@
             data: historicalValues,
             horizon: horizon
           }),
-          signal: AbortSignal.timeout(1000) // 1s timeout
+          // Increase timeout to allow the server a little more time when models are slow.
+          // 5000 ms = 5s
+          signal: AbortSignal.timeout(5000)
         });
         
         if (response.ok) {
@@ -251,20 +253,22 @@
           return {
             predictions: result.predictions || [],
             backoff: result.backoff || false,
-            actual: result.actual || historicalValues[historicalValues.length - 1] || 0
+            actual: result.actual || historicalValues[historicalValues.length - 1] || 0,
+            metadata: result.metadata || {}
           };
         }
       } catch (err) {
-        console.log('[DEBUG] ML server unavailable:', err.message);
+        // If the ML server is unavailable or slow, do NOT emit artificial/fallback predictions.
+        // Returning an empty predictions array avoids flat-line artifacts in the UI.
+        console.log('[DEBUG] ML server unavailable or timed out:', err.message);
+        const lastVal = historicalValues[historicalValues.length - 1] || 0;
+        return {
+          predictions: [],
+          backoff: false,
+          actual: lastVal,
+          metadata: {}
+        };
       }
-
-      // Fallback: static predictions (repeat last value)
-      const lastVal = historicalValues[historicalValues.length - 1] || 0;
-      return {
-        predictions: Array(horizon).fill(lastVal),
-        backoff: false,
-        actual: lastVal
-      };
     }
 
     async function updateChart() {
@@ -290,42 +294,64 @@
           backoff: mlData.backoff
         }));
 
-        // Build prediction data points (continuation from last historical point)
-        const lastTimestamp = netdataData[netdataData.length - 1].timestamp;
-        const interval = netdataData.length > 1 
-          ? netdataData[netdataData.length - 1].timestamp - netdataData[netdataData.length - 2].timestamp
-          : 1000; // default 1s
-        
-        predictedData = mlData.predictions.map((val, i) => ({
-          timestamp: lastTimestamp + (i + 1) * interval,
-          value: val,
-          backoff: mlData.backoff
-        }));
+        // Use supplied prediction timestamps directly if present (from backend)
+        if (mlData.predictions.length > 0 && typeof mlData.predictions[0] === 'object' && 'timestamp' in mlData.predictions[0]) {
+          // Each prediction is {timestamp, value}
+          predictedData = mlData.predictions.map(p => ({
+            // Always treat backend ISO timestamps as UTC
+            timestamp: Date.parse(p.timestamp.endsWith('Z') ? p.timestamp : p.timestamp + 'Z'),
+            value: p.value,
+            backoff: mlData.backoff
+          }));
+        } else {
+          // Fallback: legacy mode (should not be used with new backend)
+          const lastTimestamp = netdataData[netdataData.length - 1].timestamp;
+          // Use previous interval logic for legacy support
+          let predictionIntervalMs = null;
+          try {
+            if (mlData && mlData.metadata && mlData.metadata.prediction_interval) {
+              const pi = parseFloat(mlData.metadata.prediction_interval);
+              if (!Number.isNaN(pi) && isFinite(pi) && pi > 0) {
+                predictionIntervalMs = pi * 1000;
+              }
+            }
+          } catch (e) {
+            predictionIntervalMs = null;
+          }
+          const rawConfigured = parseInt(document.getElementById('updateInterval').value) || 1000;
+          const configuredInterval = rawConfigured <= 60 ? rawConfigured * 1000 : rawConfigured;
+          const rawInterval = netdataData.length > 1
+            ? netdataData[netdataData.length - 1].timestamp - netdataData[netdataData.length - 2].timestamp
+            : 1000;
+          const interval = predictionIntervalMs || ((rawInterval && rawInterval >= 250) ? rawInterval : Math.max(configuredInterval, 1000));
+          predictedData = mlData.predictions.map((val, i) => ({
+            timestamp: lastTimestamp + (i + 1) * interval,
+            value: val,
+            backoff: mlData.backoff
+          }));
+        }
         
         // Store prediction for the CURRENT moment (what we predict right now)
         // This is key: at timestamp T, we make predictions for T+1, T+2, etc.
         // But we want to show a dot at T representing "the prediction made at this time"
         // Use the first prediction (T+1) as representative of what we predicted "now"
-        if (mlData.predictions.length > 0) {
-          const currentPred = {
-            timestamp: lastTimestamp,  // This is the current time
-            value: mlData.predictions[0],  // What we predict for next moment
-            backoff: mlData.backoff,
-            madeAt: lastTimestamp
-          };
-          
-          // Remove any existing prediction for this timestamp (regardless of backoff state)
-          // We only want ONE prediction per timestamp - the most recent one
-          predictionHistory = predictionHistory.filter(p => p.timestamp !== currentPred.timestamp);
-          
-          // Add the new prediction
-          predictionHistory.push(currentPred);
-          console.log('[DEBUG] Added prediction:', {
-            timestamp: new Date(currentPred.timestamp).toLocaleTimeString(),
-            value: currentPred.value.toFixed(2),
-            backoff: currentPred.backoff,
-            totalHistory: predictionHistory.length
+        if (mlData.predictions.length > 0 && typeof mlData.predictions[0] === 'object' && 'timestamp' in mlData.predictions[0]) {
+          // For each prediction, upsert into predictionHistory by timestamp (interpreted as UTC)
+          mlData.predictions.forEach(pred => {
+            // Always parse as UTC
+            const ts = Date.parse(pred.timestamp + (pred.timestamp.endsWith('Z') ? '' : 'Z'));
+            predictionHistory = predictionHistory.filter(p => p.timestamp !== ts);
+            predictionHistory.push({
+              timestamp: ts,
+              value: pred.value,
+              backoff: mlData.backoff,
+              madeAt: ts
+            });
           });
+          console.log('[DEBUG] Added predictions:', mlData.predictions.map(p => ({
+            timestamp: p.timestamp,
+            value: p.value
+          })));
         }
         
         // Keep only predictions that are within our display window
@@ -360,16 +386,21 @@
   const fullTimestampsSet = new Set(allTimestamps.concat(futureTimestamps));
   const fullTimestamps = Array.from(fullTimestampsSet).sort((a, b) => a - b);
       
-      // Use readable time format with seconds to show progression
-      const labels = fullTimestamps.map(ts => {
+      // Use UTC time format with seconds to show progression
+      // Split fullTimestamps into historical and future
+      const lastHistTs = allTimestamps.length > 0 ? allTimestamps[allTimestamps.length - 1] : 0;
+      const horizon = predictedData.length;
+      // Always use UTC for all labels
+      const histLabels = fullTimestamps.filter(ts => ts <= lastHistTs).map(ts => {
         const date = new Date(ts);
-        return date.toLocaleTimeString('en-US', { 
-          hour: '2-digit', 
-          minute: '2-digit', 
-          second: '2-digit',
-          hour12: false 
-        });
+        return date.toISOString().substring(11, 19); // UTC only
       });
+      const futureLabels = fullTimestamps.filter(ts => ts > lastHistTs).map(ts => {
+        const date = new Date(ts);
+        return date.toISOString().substring(11, 19); // UTC only
+      });
+      // Concatenate, so all future points are always labeled
+      const labels = histLabels.concat(futureLabels);
       
       // Build actual data values
       const historicalValues = historicalData.map(d => d.value);
@@ -381,11 +412,12 @@
       // For chart we need arrays matching fullTimestamps length. For historical part, fill values; for future, use nulls.
       const fullHistoricalValues = fullTimestamps.map(ts => histMap.has(ts) ? histMap.get(ts) : null);
       
-      // Build quick lookup maps for past predictions and future predictedData (normalized)
-      const pastPredMap = new Map();
-      predictionHistory.forEach(p => pastPredMap.set(normalize(p.timestamp), p));
-      const futurePredMap = new Map();
-      predictedData.forEach(p => futurePredMap.set(normalize(p.timestamp), p));
+  // Build quick lookup maps for past predictions and future predictedData (normalized)
+  const pastPredMap = new Map();
+  predictionHistory.forEach(p => pastPredMap.set(normalize(p.timestamp), p));
+  // For future predictions, use the exact timestamp from backend (already ms-precise)
+  const futurePredMap = new Map();
+  predictedData.forEach(p => futurePredMap.set(normalize(p.timestamp), p));
 
       const normalPredictions = fullTimestamps.map(ts => {
         const past = pastPredMap.get(ts);
@@ -474,10 +506,17 @@
             scales: {
               x: {
                 grid: { color: '#333' },
-                ticks: { 
-                  color: '#999', 
-                  maxTicksLimit: 12,
-                  autoSkip: true
+                ticks: {
+                  color: '#999',
+                  callback: function(value, index, values) {
+                    // Always show all future horizon ticks, but autoskip for history
+                    const futureStart = histLabels.length;
+                    if (index >= futureStart) return this.getLabelForValue(this.getLabels()[index]);
+                    // For history, let Chart.js autoskip
+                    if (histLabels.length > 12 && index % Math.ceil(histLabels.length / 12) !== 0) return '';
+                    return this.getLabelForValue(this.getLabels()[index]);
+                  },
+                  autoSkip: false
                 }
               },
               y: {
@@ -495,8 +534,11 @@
         });
       } else {
         // Update existing chart data in place
-        chart.data.labels = labels;
-        chart.data.datasets[0].data = historicalValues;
+  chart.data.labels = labels;
+  // Use the full historical array (aligned to fullTimestamps) so the dataset
+  // length matches labels. Using `historicalValues` here caused misalignment
+  // and made prediction lines appear stepped or drop spikes.
+  chart.data.datasets[0].data = fullHistoricalValues;
         chart.data.datasets[1].data = normalPredictions;
         chart.data.datasets[2].data = suppressedPredictions;
         
