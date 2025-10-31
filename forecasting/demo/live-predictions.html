@@ -212,11 +212,10 @@
         }));
         
         console.log('[DEBUG] First 3 data points (raw):', data.result.data.slice(0, 3));
-        console.log('[DEBUG] Last 3 data points (raw):', data.result.data.slice(-3));
+          // Each prediction is an object; prefer backend-provided min/max if present
         console.log('[DEBUG] Parsed series length:', series.length);
-        console.log('[DEBUG] First timestamp:', new Date(series[0]?.timestamp));
-        console.log('[DEBUG] Last timestamp:', new Date(series[series.length - 1]?.timestamp));
-        
+    console.log('[DEBUG] First timestamp:', new Date(series[0]?.timestamp));
+    console.log('[DEBUG] Last timestamp:', new Date(series[series.length - 1]?.timestamp));
         // Data comes newest first, reverse to get oldest to newest
         return series.reverse();
       } catch (err) {
@@ -296,11 +295,14 @@
 
         // Use supplied prediction timestamps directly if present (from backend)
         if (mlData.predictions.length > 0 && typeof mlData.predictions[0] === 'object' && 'timestamp' in mlData.predictions[0]) {
-          // Each prediction is {timestamp, value}
+          // Each prediction is an object; prefer backend-provided min/max if present
           predictedData = mlData.predictions.map(p => ({
             // Always treat backend ISO timestamps as UTC
             timestamp: Date.parse(p.timestamp.endsWith('Z') ? p.timestamp : p.timestamp + 'Z'),
             value: p.value,
+            min: ('min' in p) ? p.min : null,
+            max: ('max' in p) ? p.max : null,
+            contributors: ('contributors' in p) ? p.contributors : [],
             backoff: mlData.backoff
           }));
         } else {
@@ -344,6 +346,9 @@
             predictionHistory.push({
               timestamp: ts,
               value: pred.value,
+              min: ('min' in pred) ? pred.min : null,
+              max: ('max' in pred) ? pred.max : null,
+              contributors: ('contributors' in pred) ? pred.contributors : [],
               backoff: mlData.backoff,
               madeAt: ts
             });
@@ -432,6 +437,24 @@
         const fut = futurePredMap.get(ts);
         return fut && fut.backoff ? fut.value : null;
       });
+
+      // Build prediction min/max arrays for envelope (use backend-provided min/max if present)
+      const predictionMin = fullTimestamps.map(ts => {
+        // prefer futurePredMap then pastPredMap
+        const fut = futurePredMap.get(ts);
+        if (fut && fut.min !== undefined && fut.min !== null) return fut.min;
+        const past = pastPredMap.get(ts);
+        if (past && past.min !== undefined && past.min !== null) return past.min;
+        return null;
+      });
+
+      const predictionMax = fullTimestamps.map(ts => {
+        const fut = futurePredMap.get(ts);
+        if (fut && fut.max !== undefined && fut.max !== null) return fut.max;
+        const past = pastPredMap.get(ts);
+        if (past && past.max !== undefined && past.max !== null) return past.max;
+        return null;
+      });
       
       console.log('[DEBUG] Render:', {
         historyLength: predictionHistory.length,
@@ -448,7 +471,7 @@
         }))
       });
 
-      if (!chart) {
+        if (!chart) {
         // Create chart on first render
         chart = new Chart(ctx, {
           type: 'line',
@@ -463,6 +486,29 @@
                 borderWidth: 2,
                 pointRadius: 0,
                 tension: 0.1
+              },
+              // Prediction envelope min (invisible baseline for fill)
+              {
+                label: 'Pred Range Min',
+                data: predictionMin,
+                borderColor: 'rgba(0,0,0,0)',
+                backgroundColor: 'rgba(0,0,0,0)',
+                borderWidth: 0,
+                pointRadius: 0,
+                tension: 0.1,
+                order: 1
+              },
+              // Prediction envelope max (fills down to previous dataset)
+              {
+                label: 'Pred Range Max',
+                data: predictionMax,
+                borderColor: 'rgba(156,39,176,0.0)',
+                backgroundColor: 'rgba(156,39,176,0.15)',
+                borderWidth: 0,
+                pointRadius: 0,
+                tension: 0.1,
+                fill: '-1',
+                order: 2
               },
               {
                 label: 'Predictions (ML)',
@@ -538,9 +584,18 @@
   // Use the full historical array (aligned to fullTimestamps) so the dataset
   // length matches labels. Using `historicalValues` here caused misalignment
   // and made prediction lines appear stepped or drop spikes.
-  chart.data.datasets[0].data = fullHistoricalValues;
-        chart.data.datasets[1].data = normalPredictions;
-        chart.data.datasets[2].data = suppressedPredictions;
+        chart.data.datasets[0].data = fullHistoricalValues;
+        // Update envelope datasets (ensure they exist)
+        if (chart.data.datasets.length >= 5) {
+          chart.data.datasets[1].data = predictionMin;
+          chart.data.datasets[2].data = predictionMax;
+          chart.data.datasets[3].data = normalPredictions;
+          chart.data.datasets[4].data = suppressedPredictions;
+        } else {
+          // Fallback: set by index (legacy)
+          chart.data.datasets[1].data = normalPredictions;
+          chart.data.datasets[2].data = suppressedPredictions;
+        }
         
         // Update y-axis limits if configured
         const yMin = document.getElementById('yMin').value;

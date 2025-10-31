@@ -99,7 +99,9 @@ class UniversalForecaster:
         # Consecutive OK suppressed validations needed to clear backoff
         backoff_clear_consecutive_ok: int = 3,
         print_min_validations: int = 3,
-        quiet: bool = False
+        quiet: bool = False,
+        use_rmse: bool = False,
+        history_fetcher=None
     ):
         """
         Initialize universal forecaster.
@@ -138,6 +140,14 @@ class UniversalForecaster:
         self.backoff_clear_consecutive_ok = backoff_clear_consecutive_ok
         self.print_min_validations = print_min_validations
         self.quiet = quiet
+        self.use_rmse = use_rmse
+        # Callable to fetch historical training data: history_fetcher(seconds_back) -> pd.Series
+        self.history_fetcher = history_fetcher
+        # Aggregation method for multiple predictions per target timestamp.
+        # Options: 'mean' (default), 'median', 'last' (most recent), 'weighted' (recency-weighted)
+        self.aggregation_method = 'mean'
+        # Tau (in steps) for exponential recency weighting when aggregation_method=='weighted'
+        self.aggregation_weight_tau = 2.0
         
         # State tracking
         self.step = 0
@@ -159,6 +169,13 @@ class UniversalForecaster:
         
         # Prediction tracking
         self.pending_validations = deque(maxlen=100)
+        self.pending_predictions = {}  # target_ts -> list of (step, pred_val)
+        # Finalized aggregated predictions (target_ts -> (agg_val, n_contributors, finalized_step))
+        self.finalized_predictions = {}
+        # Set of target timestamps that have been finalized (aggregation done once)
+        self.finalized_targets = set()
+        # Track which finalized timestamps have been printed with their final actual value
+        self.finalized_printed = set()
         self.recent_predictions = deque(maxlen=max(1, int(prediction_smoothing)))
 
     # Hidden/backoff tracking (predictions that are not visible to users during backoff)
@@ -211,6 +228,55 @@ class UniversalForecaster:
             print(f"[Baseline] Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}")
         
         return train_time
+
+    def _get_training_series(self, live_data: pd.Series) -> pd.Series:
+        """
+        Obtain a training series to use for retraining.
+
+        Priority:
+        - If a history_fetcher callable was provided at init, call it with
+          self.train_window and expect a pd.Series (or DataFrame) back.
+        - Otherwise, fall back to using the provided live_data (last window).
+
+        The returned object will be a pd.Series of numeric values. If the
+        fetcher returns a DataFrame, try to extract a sensible column ("value"
+        or the first column).
+        """
+        # Try history_fetcher if provided
+        if callable(getattr(self, 'history_fetcher', None)):
+            try:
+                res = self.history_fetcher(int(self.train_window))
+                # If DataFrame, try to extract a sensible column
+                if isinstance(res, pd.DataFrame):
+                    if 'value' in res.columns:
+                        ser = res['value']
+                    else:
+                        ser = res.iloc[:, 0]
+                else:
+                    ser = res
+
+                # Ensure it's a Series
+                if isinstance(ser, pd.Series):
+                    # If it's shorter than requested, fall back to live_data
+                    if len(ser) >= int(self.train_window):
+                        return ser.sort_index()
+                    else:
+                        # fall through to fallback
+                        pass
+            except Exception:
+                # Any failure: fall back to live_data below
+                pass
+
+        # Fallback: use the most recent data available in live_data
+        try:
+            # If live_data is longer than train_window, take the tail
+            if len(live_data) >= int(self.train_window):
+                return live_data.tail(int(self.train_window)).sort_index()
+            else:
+                return live_data.sort_index()
+        except Exception:
+            # As a last resort, return live_data as-is
+            return live_data
     
     def forecast_step(self, live_data: pd.Series) -> List[float]:
         """
@@ -239,7 +305,8 @@ class UniversalForecaster:
                     raw_preds = [max(-1e9, min(1e9, float(p))) if np.isfinite(p) else 0.0 for p in raw_preds]
                 else:
                     raw_preds = []
-                creation_ts = live_data.index[-1]
+                # Normalize creation timestamp to whole seconds for consistent matching/validation
+                creation_ts = live_data.index[-1].floor('S')
                 # Keep last hidden prediction for this creation timestamp
                 try:
                     self.hidden_pending_validations = deque([h for h in self.hidden_pending_validations if h[1] != creation_ts], maxlen=self.hidden_pending_validations.maxlen)
@@ -249,6 +316,30 @@ class UniversalForecaster:
                         if h[1] != creation_ts:
                             newdq.append(h)
                     self.hidden_pending_validations = newdq
+                # Also store contributors for aggregation so suppressed predictions participate in final aggregation
+                try:
+                    if raw_preds:
+                        pred_values = [float(p) for p in raw_preds]
+                        target_timestamps = [creation_ts + pd.Timedelta(seconds=i+1) for i in range(len(pred_values))]
+                        for i, (target_ts, pred_val) in enumerate(zip(target_timestamps, pred_values)):
+                            if target_ts not in self.pending_predictions:
+                                self.pending_predictions[target_ts] = []
+                            self.pending_predictions[target_ts].append((self.step, pred_val))
+                            if len(self.pending_predictions[target_ts]) > 10:
+                                self.pending_predictions[target_ts] = self.pending_predictions[target_ts][-10:]
+
+                            # Finalize if enough contributors
+                            required = getattr(self.model, 'horizon', None)
+                            if required is not None and len(self.pending_predictions[target_ts]) >= int(required) and target_ts not in self.finalized_targets:
+                                try:
+                                    agg_val, n_contrib = self._aggregate_for_target(self.pending_predictions[target_ts])
+                                    self.finalized_predictions[target_ts] = (float(agg_val), int(n_contrib), self.step)
+                                    self.finalized_targets.add(target_ts)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
                 self.hidden_pending_validations.append((self.step, creation_ts, raw_preds, "suppressed"))
                 self.step += 1
                 return raw_preds
@@ -297,11 +388,43 @@ class UniversalForecaster:
         else:
             preds = []
         
-        # Store for validation - keep only the LAST prediction for a given creation timestamp
+        # Store for validation - aggregate multiple predictions for same future timestamps
         if preds:
             # Normalize creation timestamp to whole seconds for consistent matching/validation
             last_actual_ts = live_data.index[-1].floor('S')
             pred_values = [float(p) for p in preds]
+            
+            # Store predictions by their target timestamps (when they will be validated)
+            # Each prediction covers horizon steps ahead
+            target_timestamps = [last_actual_ts + pd.Timedelta(seconds=i+1) for i in range(len(pred_values))]
+            
+            for i, (target_ts, pred_val) in enumerate(zip(target_timestamps, pred_values)):
+                # Initialize list for this target timestamp if not exists
+                if target_ts not in self.pending_predictions:
+                    self.pending_predictions[target_ts] = []
+                self.pending_predictions[target_ts].append((self.step, pred_val))
+                
+                # Keep only recent predictions (limit memory)
+                if len(self.pending_predictions[target_ts]) > 10:  # Keep last 10 predictions
+                    self.pending_predictions[target_ts] = self.pending_predictions[target_ts][-10:]
+                
+                # If we now have as many contributors as the horizon, finalize aggregation once
+                try:
+                    required = getattr(self.model, 'horizon', None)
+                except Exception:
+                    required = None
+                if required is not None and len(self.pending_predictions[target_ts]) >= int(required) and target_ts not in self.finalized_targets:
+                    try:
+                        agg_val, n_contrib = self._aggregate_for_target(self.pending_predictions[target_ts])
+                        # Record finalized aggregated value (do not remove contributors - keep them for future visualization if needed)
+                        self.finalized_predictions[target_ts] = (float(agg_val), int(n_contrib), self.step)
+                        self.finalized_targets.add(target_ts)
+                        # Do not print here; wait until actual value is available at validation time
+                    except Exception:
+                        # Guard against aggregation failures - ignore and continue
+                        pass
+            
+            # Also store the full prediction set for UI display (keep only latest)
             # Remove any existing pending validation with same creation timestamp
             try:
                 self.pending_validations = deque([pv for pv in self.pending_validations if pv[1] != last_actual_ts], maxlen=self.pending_validations.maxlen)
@@ -318,7 +441,7 @@ class UniversalForecaster:
             try:
                 pred_times = [last_actual_ts + pd.Timedelta(seconds=i+1) for i in range(len(pred_values))]
                 pred_times_str = [t.strftime('%H:%M:%S') for t in pred_times]
-                print(f"[PREDICT] step={self.step} preds=" + ', '.join(f"{v:.3f}@{t}" for v, t in zip(pred_values, pred_times_str)))
+                # print(f"[PREDICT] step={self.step} preds=" + ', '.join(f"{v:.3f}@{t}" for v, t in zip(pred_values, pred_times_str)))
             except Exception as e:
                 print(f"[PREDICT] print error: {e}")
         
@@ -405,16 +528,27 @@ class UniversalForecaster:
         # Remove from queue (we're processing it now)
         self.hidden_pending_validations.popleft()
 
-        # Attempt validation similar to validate_predictions
+        # Attempt validation using aggregated predictions
         horizon_errors = []
         horizon_actuals = []
         horizon_preds = []
-        for i, pred_val in enumerate(pred_values):
+        
+        # Calculate target timestamps for this prediction set
+        target_timestamps = [creation_ts + pd.Timedelta(seconds=i+1) for i in range(len(pred_values))]
+        
+        for i, target_ts in enumerate(target_timestamps):
+            # Get aggregated prediction for this target timestamp
+            if target_ts in self.pending_predictions and self.pending_predictions[target_ts]:
+                aggregated_pred, contrib_n = self._aggregate_for_target(self.pending_predictions[target_ts])
+            else:
+                # Fallback to original prediction if no aggregated data
+                aggregated_pred = pred_values[i]
+            
             offset_from_now = steps_elapsed - (i + 1)
             try:
                 current_ts = live_data.index[-1]
-                target_ts = current_ts - pd.Timedelta(seconds=offset_from_now)
-                target_ts_floor = target_ts.floor('S')
+                target_ts_actual = current_ts - pd.Timedelta(seconds=offset_from_now)
+                target_ts_floor = target_ts_actual.floor('S')
                 idx_secs = live_data.index.floor('S')
                 matches = live_data.loc[idx_secs == target_ts_floor]
                 if len(matches) > 0:
@@ -426,22 +560,47 @@ class UniversalForecaster:
                 self._append_backoff_log(self.model.get_model_name(), "hidden_validate_lookup_err", f"err={e}")
                 continue
 
-            err_abs = abs(y_true_now - float(pred_val))
-            denominator = (abs(y_true_now) + abs(float(pred_val))) / 2.0
+            # If this target was finalized and not yet printed with its final actual, print now
+            if target_ts in self.finalized_predictions and target_ts not in self.finalized_printed and not self.quiet:
+                try:
+                    agg_val, n_contrib, finalized_step = self.finalized_predictions[target_ts]
+                    print(f"[AGG-RESULT] target={target_ts} agg={agg_val:.3f} actual={y_true_now:.3f} n={n_contrib}")
+                except Exception:
+                    pass
+                self.finalized_printed.add(target_ts)
+
+            err_abs = abs(y_true_now - aggregated_pred)
+            denominator = (abs(y_true_now) + abs(aggregated_pred)) / 2.0
             if denominator < 1e-6:
                 continue
-            err_relative = (err_abs / denominator) * 100.0
-            err_relative = min(err_relative, 1000.0)
+            
+            # Calculate error based on metric choice
+            use_rmse = getattr(self, 'use_rmse', False)
+            if use_rmse:
+                # RMSE: use squared absolute error
+                err_relative = err_abs ** 2
+            else:
+                # MAPE: symmetric mean absolute percentage error
+                err_relative = (err_abs / denominator) * 100.0
+                err_relative = min(err_relative, 1000.0)
 
             horizon_errors.append(err_relative)
             horizon_actuals.append(y_true_now)
-            horizon_preds.append(pred_val)
+            horizon_preds.append(aggregated_pred)
 
         if len(horizon_errors) != self.model.horizon:
             # Incomplete validation - discard this prediction
             return
 
-        mean_horizon_error = float(np.mean(horizon_errors))
+        # Calculate final error metric
+        use_rmse = getattr(self, 'use_rmse', False)
+        if use_rmse:
+            # For RMSE: take square root of mean squared errors
+            mean_horizon_error = float(np.sqrt(np.mean(horizon_errors)))
+        else:
+            # For MAPE: mean of percentage errors
+            mean_horizon_error = float(np.mean(horizon_errors))
+        
         # Store for later validation (log happens in SUPP print or backoff decision)
         try:
             self._suppressed_errors.append(mean_horizon_error)
@@ -483,9 +642,11 @@ class UniversalForecaster:
                     self._append_backoff_log(self.model.get_model_name(), "timestamp_format_err", f"err={e}")
                     ts_str = ''
                 thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
-                print(f"[{ts_str}] [B] SUPP s={creation_step} err={mean_horizon_error:.3f}% thr={thr_str}%")
-                if mean_horizon_error > 500.0:
-                    print(f"[WARN] Extreme suppressed err={mean_horizon_error:.3f}% s={creation_step}")
+                error_unit = "" if getattr(self, 'use_rmse', False) else "%"
+                extreme_threshold = 500.0 if not getattr(self, 'use_rmse', False) else 100.0  # Adjust for RMSE scale
+                print(f"[{ts_str}] [B] SUPP s={creation_step} err={mean_horizon_error:.3f}{error_unit} thr={thr_str}{error_unit}")
+                if mean_horizon_error > extreme_threshold:
+                    print(f"[WARN] Extreme suppressed err={mean_horizon_error:.3f}{error_unit} s={creation_step}")
 
             # Track consecutive OKs for backoff clearing logic (no separate BOFF log - redundant with SUPP line)
             if mean_horizon_error <= threshold:
@@ -527,13 +688,19 @@ class UniversalForecaster:
             return
 
         try:
-            retrain_time = self.model.train(live_data)
+            retrain_series = self._get_training_series(live_data)
+            retrain_time = self.model.train(retrain_series)
             self.training_times.append(retrain_time)
             self.last_retrain_step = self.step
-            
+
             # Update baseline statistics with new training data
-            self.baseline_mean = float(live_data.mean())
-            self.baseline_std = float(live_data.std())
+            try:
+                self.baseline_mean = float(retrain_series.mean())
+                self.baseline_std = float(retrain_series.std())
+            except Exception:
+                # Fallback to live_data if computing stats on retrain_series fails
+                self.baseline_mean = float(live_data.mean())
+                self.baseline_std = float(live_data.std())
             
             # If we are in an active backoff, count this retrain for evaluation
             if getattr(self, '_backoff_active', False):
@@ -577,6 +744,44 @@ class UniversalForecaster:
         except Exception as e:
             self._append_backoff_log(self.model.get_model_name(), "hidden_retrain_failed", f"err={e}")
             self.backoff_retrain_scheduled_time = None
+
+    def _aggregate_for_target(self, preds_with_steps: list):
+        """Aggregate a list of (step, pred_val) tuples into a single prediction.
+
+        Returns (aggregated_value, n_contributors).
+        """
+        if not preds_with_steps:
+            return (None, 0)
+
+        # Extract in chronological order (they are appended in order)
+        preds = [pv for _, pv in preds_with_steps]
+        n = len(preds)
+        method = getattr(self, 'aggregation_method', 'mean')
+
+        if method == 'mean':
+            return (float(np.mean(preds)), n)
+        elif method == 'median':
+            return (float(np.median(preds)), n)
+        elif method == 'last':
+            return (float(preds[-1]), n)
+        elif method == 'weighted':
+            # Recency-weighted: weight = exp(-age / tau), where age in steps = self.step - pred_step
+            tau = max(1e-6, getattr(self, 'aggregation_weight_tau', 2.0))
+            weights = []
+            values = []
+            for step, val in preds_with_steps:
+                age = max(0, self.step - step)
+                w = np.exp(-float(age) / float(tau))
+                weights.append(w)
+                values.append(float(val))
+            weights = np.array(weights, dtype=float)
+            values = np.array(values, dtype=float)
+            if weights.sum() == 0:
+                return (float(np.mean(values)), n)
+            return (float(np.sum(weights * values) / np.sum(weights)), n)
+        else:
+            # Unknown method, fallback to mean
+            return (float(np.mean(preds)), n)
     
     def validate_predictions(self, live_data: pd.Series) -> Optional[float]:
         """
@@ -629,13 +834,13 @@ class UniversalForecaster:
     def _validate_one_prediction(self, live_data: pd.Series, creation_step: int, creation_ts, 
                                   pred_values: list, pred_type: str) -> Optional[float]:
         """
-        Validate a single prediction (visible or hidden).
+        Validate a single prediction set using aggregated predictions for each target timestamp.
         
         Args:
             live_data: Current live data
             creation_step: Step when prediction was created
             creation_ts: Timestamp when prediction was created
-            pred_values: Prediction values
+            pred_values: Original prediction values (for backward compatibility)
             pred_type: Type of prediction ("visible", "suppressed", "short", "post_retrain")
             
         Returns:
@@ -643,19 +848,32 @@ class UniversalForecaster:
         """
         steps_elapsed = self.step - creation_step
         
-        # Validate all horizon steps
+        # Validate all horizon steps using aggregated predictions
         horizon_errors = []
         horizon_actuals = []
         horizon_preds = []
         
-        for i, pred_val in enumerate(pred_values):
-            offset_from_now = steps_elapsed - (i + 1)
+        for i in range(self.model.horizon):
+            # Calculate target timestamp for this horizon step
+            target_ts = creation_ts + pd.Timedelta(seconds=i+1)
+            
+            # Get aggregated prediction for this target timestamp
+            if target_ts in self.pending_predictions and self.pending_predictions[target_ts]:
+                aggregated_pred, contrib_n = self._aggregate_for_target(self.pending_predictions[target_ts])
+                # Do not print intermediate aggregations here; final aggregation with actual will be printed once at validation time
+            else:
+                # Fallback to original prediction if no aggregated data
+                if i < len(pred_values):
+                    aggregated_pred = pred_values[i]
+                else:
+                    continue
             
             # Find actual value
             try:
                 current_ts = live_data.index[-1]
-                target_ts = current_ts - pd.Timedelta(seconds=offset_from_now)
-                target_ts_floor = target_ts.floor('S')
+                offset_from_now = steps_elapsed - (i + 1)
+                target_ts_actual = current_ts - pd.Timedelta(seconds=offset_from_now)
+                target_ts_floor = target_ts_actual.floor('S')
                 
                 idx_secs = live_data.index.floor('S')
                 matches = live_data.loc[idx_secs == target_ts_floor]
@@ -667,26 +885,58 @@ class UniversalForecaster:
                 if pred_type != "visible":
                     self._append_backoff_log(self.model.get_model_name(), "validation_lookup_failed", f"err={e}")
                 continue
+
+            # If this target was finalized and not yet printed with its final actual, print now
+            if target_ts in self.finalized_predictions and target_ts not in self.finalized_printed and not self.quiet:
+                try:
+                    agg_val, n_contrib, finalized_step = self.finalized_predictions[target_ts]
+                    print(f"[AGG-RESULT] creation={creation_ts} target={target_ts} agg={agg_val:.3f} actual={y_true_now:.3f} n={n_contrib}")
+                except Exception:
+                    pass
+                self.finalized_printed.add(target_ts)
             
             # Calculate error with safeguards
-            err_abs = abs(y_true_now - float(pred_val))
-            denominator = (abs(y_true_now) + abs(float(pred_val))) / 2.0
+            err_abs = abs(y_true_now - aggregated_pred)
+            denominator = (abs(y_true_now) + abs(aggregated_pred)) / 2.0
             
             if denominator < 1e-6:
                 continue
             
-            err_relative = (err_abs / denominator) * 100.0
-            err_relative = min(err_relative, 1000.0)
+            # Calculate error based on metric choice
+            use_rmse = getattr(self, 'use_rmse', False)
+            if use_rmse:
+                # RMSE: use squared absolute error
+                err_relative = err_abs ** 2
+            else:
+                # MAPE: symmetric mean absolute percentage error
+                err_relative = (err_abs / denominator) * 100.0
+                err_relative = min(err_relative, 1000.0)
             
             horizon_errors.append(err_relative)
             horizon_actuals.append(y_true_now)
-            horizon_preds.append(pred_val)
+            horizon_preds.append(aggregated_pred)
         
         # Only process if validated full horizon
         if len(horizon_errors) != self.model.horizon:
             return None
         
-        mean_horizon_error = float(np.mean(horizon_errors))
+        # Calculate final error metric
+        use_rmse = getattr(self, 'use_rmse', False)
+        if use_rmse:
+            # For RMSE: take square root of mean squared errors
+            mean_horizon_error = float(np.sqrt(np.mean(horizon_errors)))
+        else:
+            # For MAPE: mean of percentage errors
+            mean_horizon_error = float(np.mean(horizon_errors))
+        
+        # Clean up validated predictions from memory
+        current_ts = live_data.index[-1].floor('S')
+        # Remove predictions that are too old (more than horizon steps in the past)
+        cutoff_ts = current_ts - pd.Timedelta(seconds=self.model.horizon * 2)
+        self.pending_predictions = {
+            ts: preds for ts, preds in self.pending_predictions.items() 
+            if ts > cutoff_ts
+        }
         
         # Handle based on prediction type
         if pred_type == "visible":
@@ -701,8 +951,10 @@ class UniversalForecaster:
                                    creation_step: int) -> float:
         """Handle a visible prediction validation result."""
         # Debug: warn about extreme errors
-        if mean_horizon_error > 500.0 and not self.quiet:
-            print(f"[WARN] Extreme err={mean_horizon_error:.3f}% act={np.mean(horizon_actuals):.3f} pred={np.mean(horizon_preds):.3f}")
+        extreme_threshold = 500.0 if not getattr(self, 'use_rmse', False) else 100.0
+        error_unit = "" if getattr(self, 'use_rmse', False) else "%"
+        if mean_horizon_error > extreme_threshold and not self.quiet:
+            print(f"[WARN] Extreme err={mean_horizon_error:.3f}{error_unit} act={np.mean(horizon_actuals):.3f} pred={np.mean(horizon_preds):.3f}")
         
         self.errors.append(mean_horizon_error)
         self.recent_errors.append(mean_horizon_error)
@@ -781,7 +1033,8 @@ class UniversalForecaster:
                 self._append_backoff_log(self.model.get_model_name(), "timestamp_format_failed", f"err={e}")
                 ts_str = ''
             thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
-            print(f"[{ts_str}] [P] VAL s={self.step} err={mean_horizon_error:.3f}% thr={thr_str}%")
+            error_unit = "" if getattr(self, 'use_rmse', False) else "%"
+            print(f"[{ts_str}] [P] VAL s={self.step} err={mean_horizon_error:.3f}{error_unit} thr={thr_str}{error_unit}")
         
         # Store for final statistics
         for actual, pred in zip(horizon_actuals, horizon_preds):
@@ -884,11 +1137,18 @@ class UniversalForecaster:
                     # Use same threshold as normal retraining (retrain_consec)
                     if self._consecutive_error_suppressed >= self.retrain_consec:
                         try:
-                            retrain_time = self.model.train(live_data)
+                            retrain_series = self._get_training_series(live_data)
+                            retrain_time = self.model.train(retrain_series)
                             self.training_times.append(retrain_time)
                             self.last_retrain_step = self.step
                             prev_retrain_time = self.last_retrain_time
                             self.last_retrain_time = time.time()
+                            try:
+                                self.baseline_mean = float(retrain_series.mean())
+                                self.baseline_std = float(retrain_series.std())
+                            except Exception:
+                                self.baseline_mean = float(live_data.mean())
+                                self.baseline_std = float(live_data.std())
                             if not self.quiet:
                                 print(f"[SUPP] Retrain s={self.step} t={retrain_time:.3f}s (backoff mode)")
                                 print(f"[Baseline] Updated - Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}")
@@ -924,16 +1184,21 @@ class UniversalForecaster:
             rapid_retrain_detected = (now - self.last_retrain_time) < float(self.retrain_rapid_seconds)
             
             try:
-                retrain_time = self.model.train(live_data)
+                retrain_series = self._get_training_series(live_data)
+                retrain_time = self.model.train(retrain_series)
                 self.training_times.append(retrain_time)
                 self.last_retrain_step = self.step
                 prev_retrain_time = self.last_retrain_time
                 self.last_retrain_time = time.time()
                 self.consec_count = 0
-                
+
                 # Update baseline statistics with new training data
-                self.baseline_mean = float(live_data.mean())
-                self.baseline_std = float(live_data.std())
+                try:
+                    self.baseline_mean = float(retrain_series.mean())
+                    self.baseline_std = float(retrain_series.std())
+                except Exception:
+                    self.baseline_mean = float(live_data.mean())
+                    self.baseline_std = float(live_data.std())
 
                 if not self.quiet:
                     print(f"[{self.model.get_model_name()}] Retrain s={self.step} t={retrain_time:.3f}s thr={threshold:.3f}%")

@@ -103,7 +103,7 @@ def main():
     parser.add_argument('--prediction-smoothing', type=int,
                         default=2, help='Number of predictions to average')
     parser.add_argument('--prediction-interval', type=float,
-                        default=5.0, help='Seconds between predictions')
+                        default=1.0, help='Seconds between predictions')
 
     # Retraining parameters
     parser.add_argument('--retrain-scale', type=float,
@@ -131,6 +131,13 @@ def main():
     parser.add_argument('--quiet', action='store_true', help='Suppress output')
     parser.add_argument('--print-min-validations', type=int,
                         default=3, help='Min validations before printing')
+    parser.add_argument('--use-rmse', action='store_true',
+                        help='Use RMSE instead of MAPE for error calculation')
+    parser.add_argument('--aggregation-method', type=str,
+                        choices=['mean', 'median', 'last', 'weighted'],
+                        default='weighted', help='Aggregation method for overlapping predictions')
+    parser.add_argument('--aggregation-weight-tau', type=float,
+                        default=2.0, help='Tau (in steps) for recency weighting when using weighted aggregation')
 
     # Server
     parser.add_argument('--no-live-server', action='store_true',
@@ -195,8 +202,13 @@ def main():
         backoff_max_retrains=args.backoff_max_retrains,
         backoff_clear_consecutive_ok=args.backoff_clear_consecutive_ok,
         print_min_validations=args.print_min_validations,
-        quiet=args.quiet
+        quiet=args.quiet,
+        use_rmse=args.use_rmse,
+        history_fetcher=lambda seconds: get_data_from_api(args.ip, args.context, args.dimension, seconds)['value']
     )
+    # Apply aggregation preferences from CLI
+    forecaster.aggregation_method = args.aggregation_method
+    forecaster.aggregation_weight_tau = args.aggregation_weight_tau
 
     init_df = get_data_from_api(
         args.ip, args.context, args.dimension, train_window)['value']
@@ -253,7 +265,33 @@ def main():
                 live_df.index[-1] + dt.timedelta(seconds=1),
                 live_df.index[-1] + dt.timedelta(seconds=args.horizon+1), dtype='datetime64[s]')
 
-            pred_df = pd.DataFrame({'timestamp':pred_timestamps, 'prediction':predictions})
+            # Use aggregated predictions for UI display if available
+            aggregated_predictions = []
+            for ts in pred_timestamps:
+                ts_pd = pd.Timestamp(ts)
+                # If this target timestamp has been finalized (all contributors have arrived),
+                # send the finalized aggregated value (historical final value)
+                if hasattr(forecaster, 'finalized_predictions') and ts_pd in forecaster.finalized_predictions:
+                    try:
+                        agg_val, n_contrib, finalized_step = forecaster.finalized_predictions[ts_pd]
+                        aggregated_predictions.append(float(agg_val))
+                        continue
+                    except Exception:
+                        pass
+
+                # Otherwise, for non-final (future) targets show the most recent contributor
+                if hasattr(forecaster, 'pending_predictions') and ts_pd in forecaster.pending_predictions:
+                    pred_vals = [pred_val for _, pred_val in forecaster.pending_predictions[ts_pd]]
+                    if pred_vals:
+                        # Use the most recent prediction for visualization of future targets
+                        aggregated_predictions.append(float(pred_vals[-1]))
+                        continue
+
+                # Fallback to the current prediction array
+                idx = len(aggregated_predictions)
+                aggregated_predictions.append(predictions[idx] if idx < len(predictions) else 0.0)
+
+            pred_df = pd.DataFrame({'timestamp':pred_timestamps, 'prediction':aggregated_predictions})
             pred_df.set_index('timestamp', inplace=True)
             pred_df = pred_df.sort_index()
             
@@ -282,11 +320,69 @@ def main():
                     for _ in range(horizon - len(pred_values)):
                         pred_values.append(pad_value)
                         pred_times.append(pred_times[-1] + dt.timedelta(seconds=1))
-                pred_payload = [
-                    {'timestamp': ts.isoformat(), 'value': float(val)}
-                    for ts, val in zip(pred_times, pred_values)
-                ]
-                print(f"[SEND] Sending {len(pred_payload)} predictions: " + ', '.join([f"{p['timestamp']}" for p in pred_payload]))
+                pred_payload = []
+                # For each target timestamp, include:
+                # - 'agg': finalized aggregated value (only present if finalized)
+                # - 'agg_finalized': bool whether agg is final
+                # - 'contributors': list of contributor values (may be empty)
+                # - 'value': compatibility field (agg if finalized else most recent contributor or NaN)
+                for ts, val in zip(pred_times, pred_values):
+                    ts_pd = pd.Timestamp(ts)
+                    agg = None
+                    agg_finalized = False
+                    contributors = []
+
+                    if hasattr(forecaster, 'pending_predictions') and ts_pd in forecaster.pending_predictions:
+                        contributors = [pv for _, pv in forecaster.pending_predictions[ts_pd]]
+
+                    if hasattr(forecaster, 'finalized_predictions') and ts_pd in forecaster.finalized_predictions:
+                        try:
+                            agg_val, n_contrib, finalized_step = forecaster.finalized_predictions[ts_pd]
+                            agg = float(agg_val)
+                            agg_finalized = True
+                        except Exception:
+                            agg = None
+
+                    # Determine a compatibility 'value' field: use agg if finalized, else most recent contributor or NaN
+                    # sanitize numeric values to JSON-friendly types (no NaN/Inf, use null)
+                    def _sanitize_num(x):
+                        try:
+                            xv = float(x)
+                        except Exception:
+                            return None
+                        # Use numpy.isfinite for broad compatibility
+                        if not np.isfinite(xv):
+                            return None
+                        return float(xv)
+
+                    contributors_s = [_sanitize_num(c) for c in contributors]
+                    agg_s = _sanitize_num(agg) if agg is not None else None
+
+                    if agg_finalized:
+                        out_value = agg_s
+                    else:
+                        # pick most recent non-null contributor if available
+                        out_value = None
+                        for c in reversed(contributors_s):
+                            if c is not None:
+                                out_value = c
+                                break
+
+                    # compute min/max from sanitized contributors (if any)
+                    contrib_vals = [c for c in contributors_s if c is not None]
+                    min_v = float(min(contrib_vals)) if contrib_vals else None
+                    max_v = float(max(contrib_vals)) if contrib_vals else None
+
+                    pred_payload.append({
+                        'timestamp': ts.isoformat(),
+                        'value': out_value,
+                        'agg': agg_s,
+                        'agg_finalized': bool(agg_finalized),
+                        'contributors': contributors_s,
+                        'min': min_v,
+                        'max': max_v
+                    })
+                # print(f"[SEND] Sending {len(pred_payload)} predictions: " + ', '.join([f"{p['timestamp']}" for p in pred_payload]))
                 requests.post(
                     f'http://localhost:{args.live_server_port}/predictions',
                     json={
@@ -321,13 +417,15 @@ def main():
     # Print statistics
     stats = forecaster.get_statistics()
     if not args.quiet:
+        error_metric = "RMSE" if args.use_rmse else "MAPE"
+        error_unit = "" if args.use_rmse else "%"
         print(f"\n{'='*70}")
         print(f"Final Statistics ({model.get_model_name()})")
         print(f"{'='*70}")
         print(
-            f"MAPE - Mean: {stats['mean_avg_err']:.2f}%  Max: {stats['max_avg_err']:.2f}%  Min: {stats['min_avg_err']:.2f}%")
+            f"{error_metric} - Mean: {stats['mean_avg_err']:.2f}{error_unit}  Max: {stats['max_avg_err']:.2f}{error_unit}  Min: {stats['min_avg_err']:.2f}{error_unit}")
         print(
-            f"MAPE - P80: {stats['p80_avg_err']:.2f}%  P95: {stats['p95_avg_err']:.2f}%  P99: {stats['p99_avg_err']:.2f}%")
+            f"{error_metric} - P80: {stats['p80_avg_err']:.2f}{error_unit}  P95: {stats['p95_avg_err']:.2f}{error_unit}  P99: {stats['p99_avg_err']:.2f}{error_unit}")
         print(f"MBE: {stats['mbe']:.2f}  PBIAS: {stats['pbias_pct']:.2f}%")
         print(
             f"Baseline - Mean: {stats['baseline_mean']:.2f}  Std: {stats['baseline_std']:.2f}")
