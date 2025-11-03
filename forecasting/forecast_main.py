@@ -101,7 +101,7 @@ def main():
 
     # Forecasting parameters
     parser.add_argument('--prediction-smoothing', type=int,
-                        default=2, help='Number of predictions to average')
+                        default=1, help='Number of predictions to average')
     parser.add_argument('--prediction-interval', type=float,
                         default=1.0, help='Seconds between predictions')
 
@@ -110,7 +110,7 @@ def main():
                         default=3.0, help='MAD multiplier for threshold')
     parser.add_argument('--retrain-min', type=float,
                         default=30.0, help='Minimum retrain threshold (%%)')
-    parser.add_argument('--retrain-consec', type=int, default=3,
+    parser.add_argument('--retrain-consec', type=int, default=5,
                         help='Consecutive violations to retrain')
     parser.add_argument('--retrain-cooldown', type=int,
                         default=0, help='Min steps between retrains')
@@ -118,7 +118,7 @@ def main():
                         help='Use std instead of MAD')
 
     # Backoff parameters
-    parser.add_argument('--retrain-rapid-seconds', type=int, default=10,
+    parser.add_argument('--retrain-rapid-seconds', type=int, default=15,
                         help='Wall-clock seconds - retrains faster than this trigger backoff')
     parser.add_argument('--backoff-long-seconds', type=int,
                         default=15, help='Base seconds for backoff window')
@@ -127,17 +127,21 @@ def main():
     parser.add_argument('--backoff-clear-consecutive-ok', type=int, default=3,
                         help='Consecutive OK suppressed validations needed to clear backoff')
 
+    # Error-spike retrain parameters
+    parser.add_argument('--retrain-error-scale', type=float, default=3.0,
+                        help='Error spike threshold multiplier (retrain if error > scale * MAD/std)')
+    parser.add_argument('--retrain-error-min', type=float, default=70.0,
+                        help='Minimum error threshold for spike retrain (MAPE %%)')
+
     # Output
     parser.add_argument('--quiet', action='store_true', help='Suppress output')
     parser.add_argument('--print-min-validations', type=int,
                         default=3, help='Min validations before printing')
-    parser.add_argument('--use-rmse', action='store_true',
-                        help='Use RMSE instead of MAPE for error calculation')
     parser.add_argument('--aggregation-method', type=str,
                         choices=['mean', 'median', 'last', 'weighted'],
                         default='weighted', help='Aggregation method for overlapping predictions')
     parser.add_argument('--aggregation-weight-tau', type=float,
-                        default=2.0, help='Tau (in steps) for recency weighting when using weighted aggregation')
+                        default=1.0, help='Tau (in steps) for recency weighting when using weighted aggregation')
 
     # Server
     parser.add_argument('--no-live-server', action='store_true',
@@ -201,9 +205,10 @@ def main():
         backoff_long_seconds=args.backoff_long_seconds,
         backoff_max_retrains=args.backoff_max_retrains,
         backoff_clear_consecutive_ok=args.backoff_clear_consecutive_ok,
+        backoff_error_scale=args.retrain_error_scale,
+        backoff_error_min=args.retrain_error_min,
         print_min_validations=args.print_min_validations,
         quiet=args.quiet,
-        use_rmse=args.use_rmse,
         history_fetcher=lambda seconds: get_data_from_api(args.ip, args.context, args.dimension, seconds)['value']
     )
     # Apply aggregation preferences from CLI
@@ -417,15 +422,13 @@ def main():
     # Print statistics
     stats = forecaster.get_statistics()
     if not args.quiet:
-        error_metric = "RMSE" if args.use_rmse else "MAPE"
-        error_unit = "" if args.use_rmse else "%"
         print(f"\n{'='*70}")
         print(f"Final Statistics ({model.get_model_name()})")
         print(f"{'='*70}")
         print(
-            f"{error_metric} - Mean: {stats['mean_avg_err']:.2f}{error_unit}  Max: {stats['max_avg_err']:.2f}{error_unit}  Min: {stats['min_avg_err']:.2f}{error_unit}")
+            f"MAPE - Mean: {stats['mean_avg_err']:.2f}%  Max: {stats['max_avg_err']:.2f}%  Min: {stats['min_avg_err']:.2f}%")
         print(
-            f"{error_metric} - P80: {stats['p80_avg_err']:.2f}{error_unit}  P95: {stats['p95_avg_err']:.2f}{error_unit}  P99: {stats['p99_avg_err']:.2f}{error_unit}")
+            f"MAPE - P80: {stats['p80_avg_err']:.2f}%  P95: {stats['p95_avg_err']:.2f}%  P99: {stats['p99_avg_err']:.2f}%")
         print(f"MBE: {stats['mbe']:.2f}  PBIAS: {stats['pbias_pct']:.2f}%")
         print(
             f"Baseline - Mean: {stats['baseline_mean']:.2f}  Std: {stats['baseline_std']:.2f}")

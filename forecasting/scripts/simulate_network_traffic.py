@@ -11,202 +11,121 @@ import random
 import subprocess
 import signal
 import sys
+from collections import deque
 
+# Global RNG and noise control. Settable from simulate_traffic (seed / noise scale).
+RNG = random.Random()
+NOISE_SCALE = 1.0
 def generate_traffic_pattern(t, pattern='daily'):
     """
     Generate traffic value based on time and pattern.
     Returns bandwidth in KB/s
+
+    Five patterns from easy to hard for forecasting models.
+    ALL patterns are periodic and learnable - difficulty is in complexity.
     
-    These patterns simulate REAL production traffic scenarios with 
-    predictable structure that forecasting models should learn.
+    1. simple_sine - Pure sine wave (EASIEST)
+    2. step_pattern - Regular high/low steps with smooth transitions
+    3. sawtooth_burst - Sawtooth with periodic bursts
+    4. multi_period - Multiple overlapping periodicities
+    5. compound_wave - Complex but fully deterministic pattern (HARDEST)
     """
-    if pattern == 'web_server':
-        # Realistic web server: baseline + periodic request bursts
-        # 60s cycle with regular traffic spikes every 15s (page loads)
-        cycle_15s = t % 15
-        
-        # Baseline traffic (background requests)
-        base = 80 + 20 * math.sin(t * 2 * math.pi / 60)
-        
-        # Regular page load bursts every 15 seconds
-        if cycle_15s < 3:  # 3-second burst for page load + assets
-            burst = 150 * math.exp(-cycle_15s / 1.5)  # Exponential decay
-            base += burst
-        
-        noise = random.gauss(0, 8)
+    
+    # PATTERN 1: SIMPLE SINE (EASIEST)
+    # Pure sine wave - smooth, predictable, single frequency
+    # Period: 30 seconds, fully periodic
+    if pattern == 'simple_sine':
+        base = 120 + 80 * math.sin(t * 2 * math.pi / 30)
+        noise = RNG.gauss(0, 3) * NOISE_SCALE
         return max(10, base + noise)
     
-    elif pattern == 'api_service':
-        # RESTful API: regular polling + scheduled jobs
-        # Clients poll every 10s, batch jobs every 30s
-        
-        # Baseline API polling (every 10s)
-        cycle_10s = t % 10
-        if cycle_10s < 1.5:
-            base = 180 + 40 * random.random()  # API response burst
+    # PATTERN 2: STEP PATTERN (EASY-MEDIUM)
+    # Two-level pattern with smooth sine transitions
+    # Period: 40 seconds (20s high, 20s low)
+    if pattern == 'step_pattern':
+        cycle = t % 40
+        if cycle < 20:
+            # High state with slight variation
+            base = 170 + 15 * math.sin(cycle * math.pi / 10)
         else:
-            base = 60 + 10 * math.sin(t * 2 * math.pi / 10)
-        
-        # Scheduled batch job every 30s (heavier load)
-        cycle_30s = t % 30
-        if 28 < cycle_30s < 30:
-            base += 200  # Batch processing spike
-        
-        noise = random.gauss(0, 12)
+            # Low state with slight variation
+            base = 70 + 10 * math.sin((cycle - 20) * math.pi / 10)
+        noise = RNG.gauss(0, 5) * NOISE_SCALE
         return max(10, base + noise)
     
-    elif pattern == 'database_backup':
-        # Database: continuous queries + periodic backups
-        # Light queries + heavy backup every 45s
-        cycle_45s = t % 45
+    # PATTERN 3: SAWTOOTH BURST (MEDIUM)
+    # Sawtooth baseline + regular predictable bursts
+    # Sawtooth period: 25s, Burst period: 15s
+    if pattern == 'sawtooth_burst':
+        # Sawtooth component (25-second period)
+        cycle_25 = t % 25
+        sawtooth = 60 + (100 * cycle_25 / 25)
         
-        # Continuous query traffic
-        base = 100 + 30 * math.sin(t * 2 * math.pi / 5)
+        # Periodic burst every 15 seconds (2-second duration)
+        cycle_15 = t % 15
+        if cycle_15 < 2:
+            burst = 80 * math.exp(-cycle_15 / 0.8)
+        else:
+            burst = 0
         
-        # Backup window: 10s of heavy I/O every 45s
-        if cycle_45s < 10:
-            backup_load = 250 * (1 - cycle_45s / 10)  # Decreasing load
-            base += backup_load
-        
-        noise = random.gauss(0, 10)
+        base = sawtooth + burst
+        noise = RNG.gauss(0, 6) * NOISE_SCALE
         return max(10, base + noise)
     
-    elif pattern == 'cdn_cache':
-        # CDN cache: cache hits (low) + cache misses (high)
-        # 20s cycle: mostly cached, periodic cache refreshes
-        cycle_20s = t % 20
+    # PATTERN 4: MULTI-PERIOD (MEDIUM-HARD)
+    # Three distinct periodic components that interact
+    # Periods: 12s (fast), 30s (medium), 60s (slow)
+    if pattern == 'multi_period':
+        # Fast oscillation (12-second period)
+        fast = 35 * math.sin(t * 2 * math.pi / 12)
         
-        if cycle_20s < 2:
-            # Cache miss/refresh burst
-            base = 300 + 50 * random.random()
-        else:
-            # Cached content (low bandwidth)
-            base = 40 + 20 * math.sin(t * 2 * math.pi / 20)
+        # Medium oscillation (30-second period)
+        medium = 50 * math.sin(t * 2 * math.pi / 30)
         
-        noise = random.gauss(0, 2)
+        # Slow oscillation (60-second period)
+        slow = 30 * math.sin(t * 2 * math.pi / 60)
+        
+        base = 120 + fast + medium + slow
+        noise = RNG.gauss(0, 7) * NOISE_SCALE
         return max(10, base + noise)
     
-    elif pattern == 'microservices':
-        # Microservices mesh: service-to-service calls
-        # Multiple services communicating on different schedules
+    # PATTERN 5: COMPOUND WAVE (HARDEST)
+    # Complex deterministic pattern with multiple interacting periodicities
+    # Combines: baseline wave, two burst cycles, and amplitude modulation
+    # Main period: 60s, but with substructure at 20s, 15s, and 8s
+    if pattern == 'compound_wave':
+        # Primary slow wave (60-second period)
+        primary = 120 + 40 * math.sin(t * 2 * math.pi / 60)
         
-        # Service A: every 8s
-        cycle_8s = t % 8
-        if cycle_8s < 1:
-            traffic_a = 120
+        # Secondary wave (20-second period) - modulates amplitude
+        secondary = 30 * math.sin(t * 2 * math.pi / 20)
+        
+        # Fast oscillation (8-second period)
+        fast = 25 * math.sin(t * 2 * math.pi / 8)
+        
+        # Periodic burst pattern (every 15 seconds, 3-second duration)
+        cycle_15 = t % 15
+        if cycle_15 < 3:
+            # Burst strength varies with position in 60s cycle
+            burst_mod = 0.7 + 0.3 * math.sin(t * 2 * math.pi / 60)
+            burst = 60 * burst_mod * math.exp(-cycle_15 / 1.2)
         else:
-            traffic_a = 30
+            burst = 0
         
-        # Service B: every 12s
-        cycle_12s = t % 12
-        if cycle_12s < 1.5:
-            traffic_b = 100
-        else:
-            traffic_b = 25
+        # Amplitude modulation (every 45 seconds - interacts with main period)
+        amp_mod = 1.0 + 0.3 * math.sin(t * 2 * math.pi / 45)
         
-        # Service C: every 6s (health checks)
-        cycle_6s = t % 6
-        if cycle_6s < 0.5:
-            traffic_c = 60
-        else:
-            traffic_c = 15
+        # Combine all components with amplitude modulation
+        base = (primary + secondary + fast) * amp_mod + burst
         
-        base = traffic_a + traffic_b + traffic_c
-        noise = random.gauss(0, 10)
+        # Moderate noise - pattern is complex but deterministic
+        noise = RNG.gauss(0, 8) * NOISE_SCALE
         return max(10, base + noise)
     
-    elif pattern == 'streaming_video':
-        # Video streaming: chunk downloads every 2-4s
-        # Adaptive bitrate with buffer management
-        cycle_3s = t % 3
-        
-        if cycle_3s < 0.8:
-            # Video chunk download
-            base = 400 + 100 * random.random()
-        else:
-            # Buffer processing/idle
-            base = 50 + 20 * math.sin(t * 2 * math.pi / 3)
-        
-        noise = random.gauss(0, 15)
-        return max(10, base + noise)
-    
-    elif pattern == 'iot_sensors':
-        # IoT sensors: synchronized reporting intervals
-        # All sensors report every 15s, staggered by 5s
-        
-        total = 0
-        # Sensor batch 1: every 15s at t=0
-        if (t % 15) < 1:
-            total += 120
-        
-        # Sensor batch 2: every 15s at t=5
-        if ((t - 5) % 15) < 1:
-            total += 100
-        
-        # Sensor batch 3: every 15s at t=10
-        if ((t - 10) % 15) < 1:
-            total += 110
-        
-        # Baseline telemetry
-        total += 40 + 10 * math.sin(t * 2 * math.pi / 15)
-        
-        noise = random.gauss(0, 8)
-        return max(10, total + noise)
-    
-    elif pattern == 'message_queue':
-        # Message queue: batched processing
-        # Messages accumulate, then batch processed
-        cycle_20s = t % 20
-        
-        if 15 < cycle_20s < 18:
-            # Batch processing window (3s)
-            base = 350 - 50 * (cycle_20s - 15)  # Decreasing as queue drains
-        else:
-            # Message accumulation (low traffic)
-            base = 60 + 15 * (cycle_20s / 20) * 100
-        
-        noise = random.gauss(0, 12)
-        return max(10, base + noise)
-    
-    elif pattern == 'monitoring_system':
-        # Monitoring/metrics: regular scrapes
-        # Multiple exporters scraped at different intervals
-        
-        # Fast metrics (every 5s)
-        cycle_5s = t % 5
-        if cycle_5s < 0.5:
-            fast_metrics = 80
-        else:
-            fast_metrics = 20
-        
-        # Slow metrics (every 30s)
-        cycle_30s = t % 30
-        if cycle_30s < 2:
-            slow_metrics = 200
-        else:
-            slow_metrics = 30
-        
-        base = fast_metrics + slow_metrics
-        noise = random.gauss(0, 8)
-        return max(10, base + noise)
-    
-    elif pattern == 'business_hours':
-        # Legacy pattern kept for compatibility
-        # Step pattern: 20s high, 10s low (repeats every 30s)
-        second = t % 30
-        if second < 20:
-            base = 150 + 20 * math.sin(second * math.pi / 10)
-        else:
-            base = 40 + 10 * random.random()
-        
-        noise = random.gauss(0, 10)
-        return max(10, base + noise)
-    
-    else:  # 'sine' or default
-        # Baseline smooth pattern for testing
-        base = 100 + 60 * math.sin(t * 2 * math.pi / 20)
-        noise = random.gauss(0, 5)
-        return max(10, base + noise)
+    # DEFAULT: Fall back to simple sine
+    base = 120 + 80 * math.sin(t * 2 * math.pi / 30)
+    noise = RNG.gauss(0, 3) * NOISE_SCALE
+    return max(10, base + noise)
 
 
 def simulate_traffic(pattern='daily', duration=3600, interval=1, verbose=True):
@@ -325,11 +244,14 @@ def main():
     
     parser.add_argument(
         '--pattern',
-        choices=['web_server', 'api_service', 'database_backup', 'cdn_cache', 
-                 'microservices', 'streaming_video', 'iot_sensors', 'message_queue',
-                 'monitoring_system', 'business_hours', 'sine'],
-        default='web_server',
-        help='Traffic pattern to simulate'
+        choices=['simple_sine', 'step_pattern', 'sawtooth_burst', 'multi_period', 'compound_wave'],
+        default='simple_sine',
+        help='Traffic pattern to simulate (difficulty: easy → hard)\n'
+             'simple_sine: Pure sine wave (30s period) - EASIEST\n'
+             'step_pattern: High/low levels with smooth transitions (40s cycle)\n'
+             'sawtooth_burst: Ramp pattern + periodic bursts (25s + 15s)\n'
+             'multi_period: Three overlapping waves (12s/30s/60s periods)\n'
+             'compound_wave: Complex multi-component pattern - HARDEST'
     )
     
     parser.add_argument(
@@ -355,60 +277,47 @@ def main():
     args = parser.parse_args()
     
     print(f"""
-╔══════════════════════════════════════════════════════════╗
-║   Network Traffic Simulator (Production Patterns)       ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║   Network Traffic Simulator (Forecasting Test Patterns)     ║
+╚══════════════════════════════════════════════════════════════╝
 
-=== APPLICATION PATTERNS ===
-  web_server      - HTTP server with regular page loads
-                    60s cycle, bursts every 15s (3s duration)
-                    Range: 60-250 KB/s | Like: nginx, Apache
-  
-  api_service     - RESTful API with polling + scheduled jobs
-                    10s polling + 30s batch jobs
-                    Range: 60-380 KB/s | Like: microservice API
-  
-  database_backup - DB queries + periodic backups
-                    Continuous queries + 10s backup every 45s
-                    Range: 70-350 KB/s | Like: PostgreSQL, MySQL
+=== DIFFICULTY PROGRESSION (EASY → HARD) ===
 
-=== INFRASTRUCTURE PATTERNS ===
-  cdn_cache       - CDN with cache hits/misses
-                    20s cycle: 2s cache refresh bursts
-                    Range: 40-350 KB/s | Like: Cloudflare, Akamai
-  
-  microservices   - Service mesh communication
-                    Multiple services (6s, 8s, 12s intervals)
-                    Range: 70-280 KB/s | Like: Kubernetes services
-  
-  message_queue   - Queue with batched processing
-                    Messages accumulate, batch process every 20s
-                    Range: 60-350 KB/s | Like: RabbitMQ, Kafka
+1. simple_sine (EASIEST)
+   • Pure sine wave, 30-second period
+   • Smooth, predictable, single frequency
+   • Range: 40-200 KB/s
+   • Perfect for: Testing basic model capability
+   
+2. square_wave (EASY-MEDIUM)
+   • Regular high/low transitions, 40-second cycle
+   • Sharp state changes, no gradual transitions
+   • Range: 60-180 KB/s
+   • Tests: Step detection, handling discontinuities
+   
+3. sawtooth (MEDIUM)
+   • Linear ramp up, sharp drop, 25-second cycle
+   • Predictable trend with sudden reset
+   • Range: 60-200 KB/s
+   • Tests: Trend detection, handling sudden changes
+   
+4. multi_frequency (MEDIUM-HARD)
+   • Multiple overlapping sine waves (10s, 25s, 60s periods)
+   • Complex interference patterns
+   • Range: 30-250 KB/s
+   • Tests: Frequency decomposition, pattern separation
+   
+5. burst_chaos (HARDEST)
+   • Irregular bursts with multiple periodicities
+   • 4 different burst sources (12s, 18s, 27s, 45s)
+   • State-dependent behavior, unpredictable spikes
+   • Range: 80-450 KB/s
+   • Tests: Multi-scale learning, burst prediction, chaos handling
 
-=== STREAMING & IOT PATTERNS ===
-  streaming_video - Video chunk downloads
-                    3s cycle: 0.8s chunk downloads
-                    Range: 50-500 KB/s | Like: HLS, DASH streaming
+=== USAGE ===
+  Start easy:  python simulate_network_traffic.py --pattern simple_sine
+  Challenge:   python simulate_network_traffic.py --pattern burst_chaos
   
-  iot_sensors     - Synchronized sensor reporting
-                    3 batches every 15s (staggered by 5s)
-                    Range: 40-370 KB/s | Like: industrial IoT
-  
-  monitoring_system - Metrics collection
-                     5s fast metrics + 30s slow metrics
-                     Range: 50-300 KB/s | Like: Prometheus scraping
-
-=== BASELINE PATTERNS ===
-  business_hours  - Step pattern (legacy compatibility)
-                    20s high, 10s low (30s cycle)
-                    Range: 40-170 KB/s
-  
-  sine            - Smooth sine wave (baseline testing)
-                    20s period, low noise
-                    Range: 40-160 KB/s
-
-All patterns simulate REAL production workloads with predictable structure.
-Models should learn these patterns for accurate forecasting.
 Press Ctrl+C to stop
 """)
     

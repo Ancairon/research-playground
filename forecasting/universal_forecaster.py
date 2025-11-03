@@ -98,9 +98,12 @@ class UniversalForecaster:
         backoff_max_retrains: int = 2,
         # Consecutive OK suppressed validations needed to clear backoff
         backoff_clear_consecutive_ok: int = 3,
+        # Error-threshold retrain: trigger retrain if error exceeds this multiplier of baseline std/MAD
+        backoff_error_scale: float = 5.0,
+        # Error-threshold retrain: minimum error threshold (MAPE %)
+        backoff_error_min: float = 70.0,
         print_min_validations: int = 3,
         quiet: bool = False,
-        use_rmse: bool = False,
         history_fetcher=None
     ):
         """
@@ -121,6 +124,8 @@ class UniversalForecaster:
             retrain_rapid_seconds: Wall-clock seconds - retrains faster than this trigger backoff
             backoff_max_retrains: Max retrains during backoff before forcing extension
             backoff_clear_consecutive_ok: Consecutive OK suppressed validations needed to clear backoff
+            backoff_error_scale: Multiplier for error-threshold retrain (trigger if error > scale * std/MAD)
+            backoff_error_min: Minimum error threshold for retrain (MAPE %)
             print_min_validations: Min validations before printing
             quiet: Suppress console output
         """
@@ -138,9 +143,10 @@ class UniversalForecaster:
         self.retrain_rapid_seconds = retrain_rapid_seconds
         self.backoff_max_retrains = backoff_max_retrains
         self.backoff_clear_consecutive_ok = backoff_clear_consecutive_ok
+        self.backoff_error_scale = backoff_error_scale
+        self.backoff_error_min = backoff_error_min
         self.print_min_validations = print_min_validations
         self.quiet = quiet
-        self.use_rmse = use_rmse
         # Callable to fetch historical training data: history_fetcher(seconds_back) -> pd.Series
         self.history_fetcher = history_fetcher
         # Aggregation method for multiple predictions per target timestamp.
@@ -574,15 +580,9 @@ class UniversalForecaster:
             if denominator < 1e-6:
                 continue
             
-            # Calculate error based on metric choice
-            use_rmse = getattr(self, 'use_rmse', False)
-            if use_rmse:
-                # RMSE: use squared absolute error
-                err_relative = err_abs ** 2
-            else:
-                # MAPE: symmetric mean absolute percentage error
-                err_relative = (err_abs / denominator) * 100.0
-                err_relative = min(err_relative, 1000.0)
+            # Calculate MAPE: symmetric mean absolute percentage error
+            err_relative = (err_abs / denominator) * 100.0
+            err_relative = min(err_relative, 1000.0)
 
             horizon_errors.append(err_relative)
             horizon_actuals.append(y_true_now)
@@ -592,14 +592,8 @@ class UniversalForecaster:
             # Incomplete validation - discard this prediction
             return
 
-        # Calculate final error metric
-        use_rmse = getattr(self, 'use_rmse', False)
-        if use_rmse:
-            # For RMSE: take square root of mean squared errors
-            mean_horizon_error = float(np.sqrt(np.mean(horizon_errors)))
-        else:
-            # For MAPE: mean of percentage errors
-            mean_horizon_error = float(np.mean(horizon_errors))
+        # Calculate final MAPE: mean of percentage errors
+        mean_horizon_error = float(np.mean(horizon_errors))
         
         # Store for later validation (log happens in SUPP print or backoff decision)
         try:
@@ -642,11 +636,9 @@ class UniversalForecaster:
                     self._append_backoff_log(self.model.get_model_name(), "timestamp_format_err", f"err={e}")
                     ts_str = ''
                 thr_str = f"{threshold:.3f}" if threshold is not None else "N/A"
-                error_unit = "" if getattr(self, 'use_rmse', False) else "%"
-                extreme_threshold = 500.0 if not getattr(self, 'use_rmse', False) else 100.0  # Adjust for RMSE scale
-                print(f"[{ts_str}] [B] SUPP s={creation_step} err={mean_horizon_error:.3f}{error_unit} thr={thr_str}{error_unit}")
-                if mean_horizon_error > extreme_threshold:
-                    print(f"[WARN] Extreme suppressed err={mean_horizon_error:.3f}{error_unit} s={creation_step}")
+                print(f"[{ts_str}] [B] SUPP s={creation_step} err={mean_horizon_error:.3f}% thr={thr_str}%")
+                if mean_horizon_error > 500.0:
+                    print(f"[WARN] Extreme suppressed err={mean_horizon_error:.3f}% s={creation_step}")
 
             # Track consecutive OKs for backoff clearing logic (no separate BOFF log - redundant with SUPP line)
             if mean_horizon_error <= threshold:
@@ -783,6 +775,35 @@ class UniversalForecaster:
             # Unknown method, fallback to mean
             return (float(np.mean(preds)), n)
     
+    def _compute_error_backoff_threshold(self) -> float:
+        """
+        Compute error threshold for backoff triggering.
+        
+        Returns threshold in same units as error metric (% for MAPE, absolute for RMSE).
+        If error exceeds this threshold, backoff is triggered to prevent bad predictions.
+        """
+        if len(self.recent_errors) == 0:
+            # No history - use minimum threshold
+            return float(self.backoff_error_min)
+        
+        arr = np.asarray(self.recent_errors, dtype=float)
+        
+        # Use MAD/std similar to retrain threshold, but with different scale
+        if self.retrain_use_mad:
+            med = float(np.nanmedian(arr))
+            mad = float(np.nanmedian(np.abs(arr - med)))
+            sigma = 1.4826 * mad
+        else:
+            sigma = float(np.nanstd(arr))
+        
+        # Use backoff_error_scale and backoff_error_min
+        threshold = max(
+            float(self.backoff_error_min),
+            float(self.backoff_error_scale) * abs(sigma)
+        )
+        
+        return threshold
+    
     def validate_predictions(self, live_data: pd.Series) -> Optional[float]:
         """
         Validate oldest pending prediction (visible or hidden) in chronological order.
@@ -902,15 +923,9 @@ class UniversalForecaster:
             if denominator < 1e-6:
                 continue
             
-            # Calculate error based on metric choice
-            use_rmse = getattr(self, 'use_rmse', False)
-            if use_rmse:
-                # RMSE: use squared absolute error
-                err_relative = err_abs ** 2
-            else:
-                # MAPE: symmetric mean absolute percentage error
-                err_relative = (err_abs / denominator) * 100.0
-                err_relative = min(err_relative, 1000.0)
+            # Calculate MAPE: symmetric mean absolute percentage error
+            err_relative = (err_abs / denominator) * 100.0
+            err_relative = min(err_relative, 1000.0)
             
             horizon_errors.append(err_relative)
             horizon_actuals.append(y_true_now)
@@ -920,14 +935,8 @@ class UniversalForecaster:
         if len(horizon_errors) != self.model.horizon:
             return None
         
-        # Calculate final error metric
-        use_rmse = getattr(self, 'use_rmse', False)
-        if use_rmse:
-            # For RMSE: take square root of mean squared errors
-            mean_horizon_error = float(np.sqrt(np.mean(horizon_errors)))
-        else:
-            # For MAPE: mean of percentage errors
-            mean_horizon_error = float(np.mean(horizon_errors))
+        # Calculate final MAPE: mean of percentage errors
+        mean_horizon_error = float(np.mean(horizon_errors))
         
         # Clean up validated predictions from memory
         current_ts = live_data.index[-1].floor('S')
@@ -951,10 +960,8 @@ class UniversalForecaster:
                                    creation_step: int) -> float:
         """Handle a visible prediction validation result."""
         # Debug: warn about extreme errors
-        extreme_threshold = 500.0 if not getattr(self, 'use_rmse', False) else 100.0
-        error_unit = "" if getattr(self, 'use_rmse', False) else "%"
-        if mean_horizon_error > extreme_threshold and not self.quiet:
-            print(f"[WARN] Extreme err={mean_horizon_error:.3f}{error_unit} act={np.mean(horizon_actuals):.3f} pred={np.mean(horizon_preds):.3f}")
+        if mean_horizon_error > 500.0 and not self.quiet:
+            print(f"[WARN] Extreme err={mean_horizon_error:.3f}% act={np.mean(horizon_actuals):.3f} pred={np.mean(horizon_preds):.3f}")
         
         self.errors.append(mean_horizon_error)
         self.recent_errors.append(mean_horizon_error)
@@ -1011,6 +1018,80 @@ class UniversalForecaster:
             self._maybe_finish_backoff(threshold)
         except Exception as e:
             self._append_backoff_log(self.model.get_model_name(), "finish_backoff_error", f"err={e}")
+        
+        # Check for error-threshold-based retrain BEFORE normal retrain check
+        # If error spikes beyond threshold, trigger immediate retrain
+        if threshold is not None and not getattr(self, '_backoff_active', False):
+            try:
+                # Compute error threshold for retrain triggering
+                error_retrain_threshold = self._compute_error_backoff_threshold()
+                
+                # If error exceeds threshold, trigger immediate retrain
+                if mean_horizon_error > error_retrain_threshold:
+                    # Check if we can retrain (respect cooldown)
+                    can_retrain = (self.step - self.last_retrain_step) >= self.retrain_cooldown
+                    
+                    if can_retrain:
+                        if not self.quiet:
+                            print(f"\n{'='*70}")
+                            print(f"[RETRAIN] Error spike detected!")
+                            print(f"[RETRAIN] Error: {mean_horizon_error:.1f}% > Threshold: {error_retrain_threshold:.1f}%")
+                            print(f"[RETRAIN] Triggering immediate retrain")
+                            print(f"{'='*70}\n")
+                        
+                        # Execute immediate retrain
+                        try:
+                            retrain_series = self._get_training_series(live_data)
+                            retrain_time = self.model.train(retrain_series)
+                            self.training_times.append(retrain_time)
+                            self.last_retrain_step = self.step
+                            prev_retrain_time = self.last_retrain_time
+                            self.last_retrain_time = time.time()
+                            self.consec_count = 0  # Reset consecutive error counter
+                            
+                            # Update baseline statistics
+                            try:
+                                self.baseline_mean = float(retrain_series.mean())
+                                self.baseline_std = float(retrain_series.std())
+                            except Exception:
+                                self.baseline_mean = float(live_data.mean())
+                                self.baseline_std = float(live_data.std())
+                            
+                            if not self.quiet:
+                                print(f"[{self.model.get_model_name()}] Retrain s={self.step} t={retrain_time:.3f}s (error spike)")
+                                print(f"[Baseline] Updated - Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}\n")
+                            
+                            self._append_backoff_log(
+                                self.model.get_model_name(), 
+                                "error_spike_retrain",
+                                f"err={mean_horizon_error:.1f}, thr={error_retrain_threshold:.1f}, time={retrain_time:.3f}s"
+                            )
+                            
+                            # Clear error history after retrain
+                            self.errors.clear()
+                            self.recent_errors.clear()
+                            
+                            # Check if this was a rapid retrain (could trigger backoff)
+                            now = time.time()
+                            rapid_retrain_detected = (now - prev_retrain_time) < float(self.retrain_rapid_seconds)
+                            if rapid_retrain_detected:
+                                elapsed = now - prev_retrain_time
+                                self._start_backoff(time.time() + float(self.backoff_long_seconds))
+                                self._append_backoff_log(self.model.get_model_name(), "rapid_retrain_backoff",
+                                                         f"elapsed={elapsed:.1f}s, block=indefinite")
+                            
+                        except Exception as e:
+                            if not self.quiet:
+                                print(f"[{self.model.get_model_name()}] Retrain failed: {e}")
+                            self._append_backoff_log(self.model.get_model_name(), "error_spike_retrain_failed", f"err={e}")
+                    else:
+                        # Can't retrain yet due to cooldown
+                        if not self.quiet:
+                            cooldown_remaining = self.retrain_cooldown - (self.step - self.last_retrain_step)
+                            print(f"[WARN] Error spike ({mean_horizon_error:.1f}% > {error_retrain_threshold:.1f}%) but retrain on cooldown ({cooldown_remaining} steps remaining)")
+                    
+            except Exception as e:
+                self._append_backoff_log(self.model.get_model_name(), "error_retrain_check_failed", f"err={e}")
         
         # Check if backoff was activated/extended during _maybe_finish_backoff - if so, don't print VAL
         in_backoff_now = time.time() < getattr(self, 'user_prediction_block_until', 0.0)
