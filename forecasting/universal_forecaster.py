@@ -938,6 +938,9 @@ class UniversalForecaster:
         # Calculate final MAPE: mean of percentage errors
         mean_horizon_error = float(np.mean(horizon_errors))
         
+        # Store latest error for external display (e.g., CSV progress)
+        self._latest_validation_error = mean_horizon_error
+        
         # Clean up validated predictions from memory
         current_ts = live_data.index[-1].floor('S')
         # Remove predictions that are too old (more than horizon steps in the past)

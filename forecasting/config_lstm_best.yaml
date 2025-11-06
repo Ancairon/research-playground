@@ -1,0 +1,29 @@
+# Auto-generated optimal LSTM configuration
+# Tuned on: 2025-11-06 12:29:28
+# Best MAPE: 31.30%
+# Best RMSE: 17.64
+# Training time: 62.06s
+
+_tuning_mape: 31.301994213304717
+_tuning_rmse: 17.64262823673704
+_tuning_train_time: 62.05687499046326
+batch-size: 32
+dropout: 0.2
+epochs: 30
+hidden-size: 32
+horizon: 3000
+learning-rate: 0.001
+lookback: 120
+model: lstm
+num-layers: 2
+prediction-smoothing: 3
+retrain-consec: 3
+retrain-cooldown: 10
+retrain-min: 50.0
+retrain-scale: 3.0
+train-window: 10000
+window: 10000
+
+
+csv-file: realistic_week.csv
+single-shot: true

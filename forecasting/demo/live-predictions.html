@@ -149,7 +149,8 @@
   <div class="container">
     <h2>Live Chart with Predictions</h2>
     <div id="configInfo" style="font-size: 12px; color: #999; margin-bottom: 10px;">
-      Configuration: <span id="configDisplay">Loading...</span>
+      Configuration: <span id="configDisplay">Loading...</span> | 
+      Data Points: <span id="dataPointsDisplay">0</span>
     </div>
     <canvas id="liveChart"></canvas>
     <div class="legend">
@@ -165,6 +166,10 @@
         <span class="legend-box" style="background: #F44336; border: 2px dashed #F44336; height: 0;"></span>
         <span>Suppressed Predictions (Backoff)</span>
       </div>
+      <div class="legend-item">
+        <span class="legend-box" style="background: #FF9800;"></span>
+        <span>Future Actual (Ground Truth)</span>
+      </div>
     </div>
   </div>
 
@@ -174,6 +179,7 @@
     let historicalData = [];
     let predictedData = [];
     let predictionHistory = []; // Store all past predictions with their timestamps
+    let futureActualsData = []; // Store actual future data (for single-shot mode)
 
     function showStatus(message, type = 'info') {
       const status = document.getElementById('status');
@@ -181,6 +187,42 @@
     }
 
     async function fetchNetdataData() {
+      // First, try to get predictions which may include CSV historical data
+      const mlServerUrl = document.getElementById('mlServerUrl').value;
+      
+      try {
+        const response = await fetch(mlServerUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+          signal: AbortSignal.timeout(2000)
+        });
+        
+        if (response.ok) {
+          const result = await response.json();
+          
+          // Check if we're in CSV mode with historical data
+          if (result.csv_mode && result.historical_data && result.historical_data.length > 0) {
+            console.log('[DEBUG] CSV Mode - using historical_data from server');
+            const series = result.historical_data.map(row => {
+              let ts = row.timestamp;
+              // Don't add Z if timestamp already has timezone info
+              if (!ts.endsWith('Z') && !ts.includes('+') && !ts.includes('-', 10)) {
+                ts = ts + 'Z';
+              }
+              return {
+                timestamp: Date.parse(ts),
+                value: row.value
+              };
+            });
+            return series;
+          }
+        }
+      } catch (err) {
+        console.log('[DEBUG] CSV mode check failed, falling back to Netdata API:', err.message);
+      }
+      
+      // Fall back to Netdata API for live mode
       const netdataUrl = document.getElementById('netdataUrl').value;
       const chartId = document.getElementById('chartId').value;
       const dimension = document.getElementById('dimension').value;
@@ -247,13 +289,18 @@
           console.log('[DEBUG] Got ML server response:', {
             predictions: result.predictions?.length || 0,
             backoff: result.backoff,
-            actual: result.actual
+            actual: result.actual,
+            single_shot: result.single_shot,
+            future_actuals: result.future_actuals?.length || 0
           });
           return {
             predictions: result.predictions || [],
             backoff: result.backoff || false,
             actual: result.actual || historicalValues[historicalValues.length - 1] || 0,
-            metadata: result.metadata || {}
+            metadata: result.metadata || {},
+            future_actuals: result.future_actuals || [],  // NEW: future actual data
+            single_shot: result.single_shot || false,  // NEW: single-shot mode flag
+            mean_error: result.mean_error  // NEW: overall error
           };
         }
       } catch (err) {
@@ -265,7 +312,9 @@
           predictions: [],
           backoff: false,
           actual: lastVal,
-          metadata: {}
+          metadata: {},
+          future_actuals: [],
+          single_shot: false
         };
       }
     }
@@ -296,15 +345,30 @@
         // Use supplied prediction timestamps directly if present (from backend)
         if (mlData.predictions.length > 0 && typeof mlData.predictions[0] === 'object' && 'timestamp' in mlData.predictions[0]) {
           // Each prediction is an object; prefer backend-provided min/max if present
-          predictedData = mlData.predictions.map(p => ({
-            // Always treat backend ISO timestamps as UTC
-            timestamp: Date.parse(p.timestamp.endsWith('Z') ? p.timestamp : p.timestamp + 'Z'),
-            value: p.value,
-            min: ('min' in p) ? p.min : null,
-            max: ('max' in p) ? p.max : null,
-            contributors: ('contributors' in p) ? p.contributors : [],
-            backoff: mlData.backoff
-          }));
+          console.log('[DEBUG] First 3 prediction timestamps (raw):', mlData.predictions.slice(0, 3).map(p => p.timestamp));
+          
+          predictedData = mlData.predictions.map(p => {
+            // Parse timestamp - handle both Z suffix and +00:00 offset
+            let ts = p.timestamp;
+            // Don't add Z if timestamp already has timezone info (+ or Z)
+            if (!ts.endsWith('Z') && !ts.includes('+') && !ts.includes('-', 10)) {
+              ts = ts + 'Z';
+            }
+            return {
+              timestamp: Date.parse(ts),
+              value: p.value,
+              min: ('min' in p) ? p.min : null,
+              max: ('max' in p) ? p.max : null,
+              contributors: ('contributors' in p) ? p.contributors : [],
+              backoff: mlData.backoff
+            };
+          });
+          
+          console.log('[DEBUG] First 3 parsed prediction timestamps:', predictedData.slice(0, 3).map(p => ({
+            timestamp: p.timestamp,
+            iso: new Date(p.timestamp).toISOString(),
+            value: p.value
+          })));
         } else {
           // Fallback: legacy mode (should not be used with new backend)
           const lastTimestamp = netdataData[netdataData.length - 1].timestamp;
@@ -359,19 +423,56 @@
           })));
         }
         
+        // Handle future actuals (for single-shot mode)
+        if (mlData.future_actuals && mlData.future_actuals.length > 0) {
+          futureActualsData = mlData.future_actuals.map(fa => {
+            let ts = fa.timestamp;
+            // Don't add Z if timestamp already has timezone info
+            if (!ts.endsWith('Z') && !ts.includes('+') && !ts.includes('-', 10)) {
+              ts = ts + 'Z';
+            }
+            return {
+              timestamp: Date.parse(ts),
+              value: fa.value
+            };
+          });
+          console.log('[DEBUG] Loaded future actuals:', futureActualsData.length, futureActualsData.slice(0, 3));
+        }
+        
+        console.log('[DEBUG] After processing - predictedData length:', predictedData.length);
+        console.log('[DEBUG] After processing - futureActualsData length:', futureActualsData.length);
+        console.log('[DEBUG] After processing - historicalData length:', historicalData.length);
+        
         // Keep only predictions that are within our display window
         const oldestTimestamp = netdataData[0].timestamp;
         predictionHistory = predictionHistory.filter(p => p.timestamp >= oldestTimestamp);
 
         // Update chart
         renderChart();
-        const statusMsg = mlData.backoff 
-          ? `⚠️ BACKOFF — ${netdataData.length} historical, predictions suppressed`
-          : `✓ Updated at ${new Date().toLocaleTimeString()} — ${netdataData.length} historical, ${mlData.predictions.length} predicted`;
-        showStatus(statusMsg, mlData.backoff ? 'error' : 'success');
+        
+        // Update status message
+        let statusMsg;
+        if (mlData.single_shot) {
+          statusMsg = `🎯 SINGLE-SHOT MODE — Mean Error: ${mlData.mean_error?.toFixed(2)}% | ${netdataData.length} historical, ${mlData.predictions.length} predicted, ${futureActualsData.length} actual`;
+          
+          // Stop live updates in single-shot mode
+          if (updateTimer) {
+            console.log('[DEBUG] Single-shot mode detected - stopping live updates');
+            clearInterval(updateTimer);
+            updateTimer = null;
+          }
+        } else {
+          statusMsg = mlData.backoff 
+            ? `⚠️ BACKOFF — ${netdataData.length} historical, predictions suppressed`
+            : `✓ Updated at ${new Date().toLocaleTimeString()} — ${netdataData.length} historical, ${mlData.predictions.length} predicted`;
+        }
+        showStatus(statusMsg, mlData.backoff ? 'error' : (mlData.single_shot ? 'info' : 'success'));
+        
+        return mlData.single_shot; // Return flag to indicate if we should stop updating
       } catch (err) {
         showStatus(`❌ Update failed: ${err.message}`, 'error');
         console.error(err);
+        return false; // Continue updating on error
       }
     }
 
@@ -386,10 +487,24 @@
 
   // Compute future timestamps for the prediction horizon (aligned with historical interval)
   const futureTimestamps = predictedData.length > 0 ? predictedData.map(p => normalize(p.timestamp)) : [];
+  
+  // Also include future actuals timestamps
+  const futureActualsTimestamps = futureActualsData.length > 0 ? futureActualsData.map(fa => normalize(fa.timestamp)) : [];
 
-  // Full label timeline = historical + future, deduped and sorted
-  const fullTimestampsSet = new Set(allTimestamps.concat(futureTimestamps));
+  // Full label timeline = historical + future predictions + future actuals, deduped and sorted
+  const fullTimestampsSet = new Set(allTimestamps.concat(futureTimestamps).concat(futureActualsTimestamps));
   const fullTimestamps = Array.from(fullTimestampsSet).sort((a, b) => a - b);
+  
+  console.log('[DEBUG] Timeline composition:', {
+    historical: allTimestamps.length,
+    futurePredictions: futureTimestamps.length,
+    futureActuals: futureActualsTimestamps.length,
+    combined: fullTimestamps.length
+  });
+  
+  // Update data points display
+  document.getElementById('dataPointsDisplay').textContent = 
+    `${allTimestamps.length} historical + ${futureTimestamps.length} predictions + ${futureActualsTimestamps.length} actuals = ${fullTimestamps.length} total`;
       
       // Use UTC time format with seconds to show progression
       // Split fullTimestamps into historical and future
@@ -423,6 +538,15 @@
   // For future predictions, use the exact timestamp from backend (already ms-precise)
   const futurePredMap = new Map();
   predictedData.forEach(p => futurePredMap.set(normalize(p.timestamp), p));
+  
+  console.log('[DEBUG] futurePredMap size:', futurePredMap.size);
+  console.log('[DEBUG] fullTimestamps length:', fullTimestamps.length);
+  if (futurePredMap.size > 0) {
+    const validKeys = Array.from(futurePredMap.keys()).filter(ts => !isNaN(ts) && ts > 0).slice(0, 5);
+    console.log('[DEBUG] Sample futurePredMap keys:', validKeys.map(ts => new Date(ts).toISOString()));
+  }
+  const validFullTimestamps = fullTimestamps.filter(ts => !isNaN(ts) && ts > 0).slice(0, 5);
+  console.log('[DEBUG] Sample fullTimestamps:', validFullTimestamps.map(ts => new Date(ts).toISOString()));
 
       const normalPredictions = fullTimestamps.map(ts => {
         const past = pastPredMap.get(ts);
@@ -455,6 +579,11 @@
         if (past && past.max !== undefined && past.max !== null) return past.max;
         return null;
       });
+      
+      // Build future actuals data (for single-shot mode)
+      const futureActualsMap = new Map();
+      futureActualsData.forEach(fa => futureActualsMap.set(normalize(fa.timestamp), fa.value));
+      const futureActuals = fullTimestamps.map(ts => futureActualsMap.get(ts) || null);
       
       console.log('[DEBUG] Render:', {
         historyLength: predictionHistory.length,
@@ -533,6 +662,18 @@
                 pointBackgroundColor: '#F44336',
                 pointBorderColor: '#F44336',
                 tension: 0.1
+              },
+              {
+                label: 'Future Actual (Ground Truth)',
+                data: futureActuals,
+                borderColor: '#FF9800',
+                backgroundColor: 'rgba(255, 152, 0, 0.2)',
+                borderWidth: 3,
+                pointRadius: 3,
+                pointBackgroundColor: '#FF9800',
+                pointBorderColor: '#FF9800',
+                tension: 0.1,
+                order: 0  // Draw on top
               }
             ]
           },
@@ -558,11 +699,19 @@
                     // Always show all future horizon ticks, but autoskip for history
                     const futureStart = histLabels.length;
                     if (index >= futureStart) return this.getLabelForValue(this.getLabels()[index]);
-                    // For history, let Chart.js autoskip
-                    if (histLabels.length > 12 && index % Math.ceil(histLabels.length / 12) !== 0) return '';
+                    
+                    // For history, intelligently skip based on data size
+                    // Show approximately 20-30 ticks for history regardless of size
+                    const targetTicks = 25;
+                    if (histLabels.length > targetTicks) {
+                      const skipInterval = Math.ceil(histLabels.length / targetTicks);
+                      if (index % skipInterval !== 0) return '';
+                    }
                     return this.getLabelForValue(this.getLabels()[index]);
                   },
-                  autoSkip: false
+                  autoSkip: false,
+                  maxRotation: 45,
+                  minRotation: 45
                 }
               },
               y: {
@@ -580,19 +729,26 @@
         });
       } else {
         // Update existing chart data in place
-  chart.data.labels = labels;
-  // Use the full historical array (aligned to fullTimestamps) so the dataset
-  // length matches labels. Using `historicalValues` here caused misalignment
-  // and made prediction lines appear stepped or drop spikes.
+        chart.data.labels = labels;
+        // Use the full historical array (aligned to fullTimestamps) so the dataset
+        // length matches labels. Using `historicalValues` here caused misalignment
+        // and made prediction lines appear stepped or drop spikes.
         chart.data.datasets[0].data = fullHistoricalValues;
-        // Update envelope datasets (ensure they exist)
-        if (chart.data.datasets.length >= 5) {
+        // Update all datasets (ensure they exist)
+        if (chart.data.datasets.length >= 6) {
+          chart.data.datasets[1].data = predictionMin;
+          chart.data.datasets[2].data = predictionMax;
+          chart.data.datasets[3].data = normalPredictions;
+          chart.data.datasets[4].data = suppressedPredictions;
+          chart.data.datasets[5].data = futureActuals;
+        } else if (chart.data.datasets.length >= 5) {
+          // Legacy: no future actuals dataset
           chart.data.datasets[1].data = predictionMin;
           chart.data.datasets[2].data = predictionMax;
           chart.data.datasets[3].data = normalPredictions;
           chart.data.datasets[4].data = suppressedPredictions;
         } else {
-          // Fallback: set by index (legacy)
+          // Fallback: very old format
           chart.data.datasets[1].data = normalPredictions;
           chart.data.datasets[2].data = suppressedPredictions;
         }
@@ -628,10 +784,17 @@
       showStatus('Starting live updates...', 'info');
       
       // Initial update
-      updateChart();
-      
-      // Schedule periodic updates
-      updateTimer = setInterval(updateChart, interval);
+      updateChart().then(isSingleShot => {
+        if (isSingleShot) {
+          // Don't start interval for single-shot mode
+          console.log('[DEBUG] Single-shot mode - no periodic updates needed');
+          document.getElementById('startBtn').disabled = false;
+          document.getElementById('stopBtn').disabled = true;
+          return;
+        }
+        // Schedule periodic updates only for normal mode
+        updateTimer = setInterval(updateChart, interval);
+      });
     }
 
     function stopLiveChart() {

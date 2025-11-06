@@ -3,6 +3,7 @@ Universal time series forecasting main entry point.
 
 Supports multiple models: XGBoost, Prophet, LSTM/GRU
 Model selection via command-line argument.
+Config files supported via --config flag.
 """
 
 from universal_forecaster import UniversalForecaster
@@ -17,6 +18,8 @@ import signal
 import psutil
 import datetime as dt
 import numpy as np
+import yaml
+import json
 
 # Add models directory to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -28,17 +31,92 @@ def get_data_from_api(ip, context, dimension, seconds_back):
         f"http://{ip}:19999/api/v3/data?"
         f"contexts={context}&dimensions={dimension}&"
         f"after=-{seconds_back}&before=0&points={seconds_back}&"
-        f"group=average&format=json&options=seconds,jsonwrap"
+        f"group=average&gtime=0&tier=0&format=json&options=seconds,jsonwrap"
     )
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    rows = resp.json()['result']['data']
-    df = pd.DataFrame(rows, columns=['timestamp', 'value'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+    r = requests.get(url, timeout=30)
+    labels = r.json()['result']['labels']
+    data = r.json()['result']['data']
+
+    records = []
+    for row in data:
+        ts = row[0]
+        val = row[1]
+        records.append({'timestamp': ts, 'value': val})
+
+    df = pd.DataFrame(records)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True)
     df.set_index('timestamp', inplace=True)
-    df = df.sort_index()
-    # print(df.index)
     return df
+
+
+class CSVDataSource:
+    """Data source that replays CSV data, emulating Netdata API behavior."""
+    
+    def __init__(self, csv_path, train_window):
+        """
+        Args:
+            csv_path: Path to CSV file (timestamp,value format)
+            train_window: Initial training window size - will start replay after this
+        """
+        self.df = pd.read_csv(csv_path)
+        self.df['timestamp'] = pd.to_datetime(self.df['timestamp'], utc=True)
+        self.df.set_index('timestamp', inplace=True)
+        self.df = self.df.sort_index()
+        
+        # Start position: after train_window
+        if len(self.df) < train_window:
+            raise ValueError(f"CSV has only {len(self.df)} rows, need at least {train_window} for training")
+        
+        self.current_index = train_window  # Start after training data
+        self.total_rows = len(self.df)
+        
+        # For simulation: map CSV timestamps to "current" time
+        # This allows validation to work properly
+        self.start_time = pd.Timestamp.now(tz='UTC')
+        self.csv_start_time = self.df.index[train_window]
+        
+        print(f"[CSV Mode] Loaded {self.total_rows} rows from {csv_path}")
+        print(f"[CSV Mode] Starting replay from row {self.current_index} (after training window)")
+        print(f"[CSV Mode] CSV time range: {self.df.index[0]} to {self.df.index[-1]}")
+        print(f"[CSV Mode] Simulated current time starts at: {self.start_time}")
+    
+    def _csv_to_current_time(self, csv_timestamp):
+        """Convert CSV timestamp to current simulation time."""
+        elapsed = (csv_timestamp - self.csv_start_time).total_seconds()
+        return self.start_time + pd.Timedelta(seconds=elapsed)
+    
+    def get_current_value(self):
+        """Get current value and advance index."""
+        if self.current_index >= self.total_rows:
+            return None  # End of data
+        
+        value = self.df.iloc[self.current_index]['value']
+        self.current_index += 1
+        return value
+    
+    def get_current_timestamp(self):
+        """Get timestamp of current position (mapped to current time)."""
+        if self.current_index >= self.total_rows:
+            return None
+        csv_ts = self.df.index[self.current_index]
+        return self._csv_to_current_time(csv_ts)
+    
+    def get_history(self, seconds_back):
+        """Get historical data up to current position (with timestamps mapped to current time)."""
+        # Get data from (current_index - seconds_back) to current_index
+        start_idx = max(0, self.current_index - seconds_back)
+        end_idx = self.current_index
+        
+        history_df = self.df.iloc[start_idx:end_idx].copy()
+        
+        # Remap timestamps to current simulation time
+        history_df.index = [self._csv_to_current_time(ts) for ts in history_df.index]
+        
+        return history_df
+    
+    def is_finished(self):
+        """Check if we've reached the end of CSV data."""
+        return self.current_index >= self.total_rows
 
 
 def kill_old_prediction_servers():
@@ -72,6 +150,13 @@ def main():
         description="Universal time series forecasting with multiple model support"
     )
 
+    # Config file support
+    parser.add_argument(
+        '--config',
+        type=str,
+        help='Path to YAML/JSON config file (overrides all other arguments)'
+    )
+
     # Model selection
     parser.add_argument(
         '--model',
@@ -98,6 +183,35 @@ def main():
                         help='Initial training window size (defaults to --window)')
     parser.add_argument('--random-state', type=int, default=42,
                         help='Random seed')
+    
+    # LSTM-specific parameters
+    parser.add_argument('--lookback', type=int, default=60,
+                        help='LSTM: Number of past timesteps to use as input')
+    parser.add_argument('--hidden-size', type=int, default=64,
+                        help='LSTM: Hidden layer size')
+    parser.add_argument('--num-layers', type=int, default=2,
+                        help='LSTM: Number of LSTM layers')
+    parser.add_argument('--dropout', type=float, default=0.2,
+                        help='LSTM: Dropout rate')
+    parser.add_argument('--learning-rate', type=float, default=0.001,
+                        help='LSTM: Learning rate')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='LSTM: Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='LSTM: Training batch size')
+    
+    
+    # Random Forest / Extra Trees parameters
+    parser.add_argument('--n-estimators', type=int, default=100,
+                        help='RF/ET: Number of trees in the forest')
+    parser.add_argument('--max-depth', type=int, default=None,
+                        help='RF/ET: Maximum depth of trees (None = unlimited)')
+    parser.add_argument('--min-samples-split', type=int, default=2,
+                        help='RF/ET: Minimum samples to split a node')
+    parser.add_argument('--min-samples-leaf', type=int, default=1,
+                        help='RF/ET: Minimum samples in a leaf node')
+    parser.add_argument('--max-features', type=str, default='sqrt',
+                        help='RF/ET: Number of features for splits (sqrt, log2, or int)')
 
     # Forecasting parameters
     parser.add_argument('--prediction-smoothing', type=int,
@@ -110,7 +224,7 @@ def main():
                         default=3.0, help='MAD multiplier for threshold')
     parser.add_argument('--retrain-min', type=float,
                         default=30.0, help='Minimum retrain threshold (%%)')
-    parser.add_argument('--retrain-consec', type=int, default=5,
+    parser.add_argument('--retrain-consec', type=int, default=3,
                         help='Consecutive violations to retrain')
     parser.add_argument('--retrain-cooldown', type=int,
                         default=0, help='Min steps between retrains')
@@ -118,13 +232,13 @@ def main():
                         help='Use std instead of MAD')
 
     # Backoff parameters
-    parser.add_argument('--retrain-rapid-seconds', type=int, default=15,
+    parser.add_argument('--retrain-rapid-seconds', type=int, default=10,
                         help='Wall-clock seconds - retrains faster than this trigger backoff')
     parser.add_argument('--backoff-long-seconds', type=int,
                         default=15, help='Base seconds for backoff window')
     parser.add_argument('--backoff-max-retrains', type=int, default=5,
                         help='Max retrains during backoff before extension')
-    parser.add_argument('--backoff-clear-consecutive-ok', type=int, default=3,
+    parser.add_argument('--backoff-clear-consecutive-ok', type=int, default=5,
                         help='Consecutive OK suppressed validations needed to clear backoff')
 
     # Error-spike retrain parameters
@@ -148,8 +262,64 @@ def main():
                         help='Disable live visualization server')
     parser.add_argument('--live-server-port', type=int,
                         default=5000, help='Live server port')
+    
+    # CSV Mode
+    parser.add_argument('--csv-file', type=str,
+                        help='CSV filename in csv/ folder (enables CSV replay mode)')
+    parser.add_argument('--csv-fast', action='store_true',
+                        help='Fast replay mode - process CSV data as fast as possible (no sleep)')
+    
+    # Single-shot mode
+    parser.add_argument('--single-shot', action='store_true',
+                        help='Single-shot mode: train once, predict once, evaluate, and exit')
+    parser.add_argument('--single-shot-skip-live-server', action='store_true',
+                        help='Skip live server in single-shot mode (auto-enabled if --single-shot)')
 
+    # Parse command line args first
     args = parser.parse_args()
+    
+    # Load config file if specified
+    if args.config:
+        config_path = args.config
+        if not os.path.exists(config_path):
+            print(f"Error: Config file not found: {config_path}")
+            sys.exit(1)
+        
+        # Determine file type and load
+        _, ext = os.path.splitext(config_path)
+        with open(config_path, 'r') as f:
+            if ext in ['.yaml', '.yml']:
+                config = yaml.safe_load(f)
+            elif ext == '.json':
+                config = json.load(f)
+            else:
+                print(f"Error: Unsupported config file format: {ext}")
+                print("Supported formats: .yaml, .yml, .json")
+                sys.exit(1)
+        
+        # Override args with config values
+        # Map config keys to argument names
+        key_mapping = {
+            'server-port': 'live_server_port',
+            'live-server': 'no_live_server',  # Note: inverted logic
+        }
+        
+        for key, value in config.items():
+            # Use mapping if available, otherwise convert hyphens to underscores
+            if key in key_mapping:
+                attr_name = key_mapping[key]
+                # Handle inverted boolean logic for live-server
+                if key == 'live-server':
+                    value = not value  # invert because arg is 'no_live_server'
+            else:
+                attr_name = key.replace('-', '_')
+            
+            if hasattr(args, attr_name):
+                setattr(args, attr_name, value)
+            else:
+                print(f"Warning: Unknown config parameter '{key}' - ignoring")
+        
+        print(f"\n[Config] Loaded configuration from: {config_path}")
 
     # Print model info
     if not args.quiet:
@@ -169,26 +339,53 @@ def main():
         'random_state': args.random_state
     }
 
-    # if args.model == 'prophet':
-    #     model_kwargs['seasonality_mode'] = 'additive'
-    #     if args.custom_seasonality:
-    #         # Parse format: name:period:fourier_order
-    #         parts = args.custom_seasonality.split(':')
-    #         if len(parts) == 3:
-    #             model_kwargs['custom_seasonalities'] = [{
-    #                 'name': parts[0],
-    #                 'period': int(parts[1]),
-    #                 'fourier_order': int(parts[2])
-    #             }]
-    # elif args.model == 'lstm':
-    #     model_kwargs['lookback'] = args.lookback
-    #     model_kwargs['hidden_size'] = args.hidden_size
-    #     model_kwargs['epochs'] = args.epochs
+    # Add model-specific parameters
+    if args.model == 'lstm':
+        model_kwargs['lookback'] = args.lookback
+        model_kwargs['hidden_size'] = args.hidden_size
+        model_kwargs['num_layers'] = args.num_layers
+        model_kwargs['dropout'] = args.dropout
+        model_kwargs['learning_rate'] = args.learning_rate
+        model_kwargs['epochs'] = args.epochs
+        model_kwargs['batch_size'] = args.batch_size
+    elif args.model in ['prophet', 'prophet-auto']:
+        model_kwargs['seasonality_mode'] = args.seasonality_mode
+        if args.model == 'prophet-auto':
+            model_kwargs['auto_detect'] = args.auto_detect
+            model_kwargs['top_seasonalities'] = args.top_seasonalities
+            model_kwargs['min_period'] = args.min_period
+            model_kwargs['max_period'] = args.max_period
+    elif args.model in ['randomforest', 'rf', 'extratrees', 'et']:
+        model_kwargs['n_estimators'] = args.n_estimators
+        model_kwargs['max_depth'] = args.max_depth
+        model_kwargs['min_samples_split'] = args.min_samples_split
+        model_kwargs['min_samples_leaf'] = args.min_samples_leaf
+        model_kwargs['max_features'] = args.max_features
 
     model = create_model(args.model, **model_kwargs)
 
     # Determine training window (use train_window if specified, otherwise window)
     train_window = args.train_window if args.train_window is not None else args.window
+
+    # Initialize CSV data source if in CSV mode
+    csv_source = None
+    if args.csv_file:
+        csv_path = os.path.join(os.path.dirname(__file__), 'csv', args.csv_file)
+        if not os.path.exists(csv_path):
+            print(f"Error: CSV file not found: {csv_path}")
+            sys.exit(1)
+        csv_source = CSVDataSource(csv_path, train_window)
+        
+        if args.csv_fast:
+            print("[CSV Mode] Fast replay enabled - processing as fast as possible")
+        else:
+            print("[CSV Mode] Normal replay - respecting original timestamps")
+
+    # Create history fetcher based on mode
+    if csv_source:
+        history_fetcher = lambda seconds: csv_source.get_history(seconds)['value']
+    else:
+        history_fetcher = lambda seconds: get_data_from_api(args.ip, args.context, args.dimension, seconds)['value']
 
     # Create universal forecaster
     forecaster = UniversalForecaster(
@@ -209,17 +406,258 @@ def main():
         backoff_error_min=args.retrain_error_min,
         print_min_validations=args.print_min_validations,
         quiet=args.quiet,
-        history_fetcher=lambda seconds: get_data_from_api(args.ip, args.context, args.dimension, seconds)['value']
+        history_fetcher=history_fetcher
     )
     # Apply aggregation preferences from CLI
     forecaster.aggregation_method = args.aggregation_method
     forecaster.aggregation_weight_tau = args.aggregation_weight_tau
 
-    init_df = get_data_from_api(
-        args.ip, args.context, args.dimension, train_window)['value']
+    # Get initial training data
+    if csv_source:
+        init_df = csv_source.get_history(train_window)['value']
+    else:
+        init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
 
     # Initial training
     forecaster.train_initial(init_df)
+
+    # === SINGLE-SHOT MODE ===
+    if args.single_shot:
+        if not args.quiet:
+            print("\n[Single-Shot] Mode enabled - making one prediction and evaluating")
+        
+        # Start live server for visualization (unless explicitly disabled)
+        server_started = False
+        if not args.single_shot_skip_live_server and not args.no_live_server:
+            kill_old_prediction_servers()
+            import subprocess
+            server_cmd = [
+                'python3', 'prediction_server.py',
+                '--port', str(args.live_server_port),
+                '--ip', args.ip,
+                '--context', args.context,
+                '--dimension', args.dimension
+            ]
+            try:
+                subprocess.Popen(
+                    server_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    cwd=os.path.dirname(__file__)
+                )
+                time.sleep(2)
+                server_started = True
+                if not args.quiet:
+                    print(f"[Server] Live visualization started on port {args.live_server_port}")
+                    print(f"[Server] Web UI: http://localhost:{args.live_server_port}/\n")
+            except Exception as e:
+                if not args.quiet:
+                    print(f"[Server] Could not start: {e}\n")
+        
+        # Verify we have enough data to evaluate (CSV mode only)
+        if csv_source:
+            # Check if we have at least horizon steps remaining after current position
+            remaining_rows = csv_source.total_rows - csv_source.current_index
+            if remaining_rows < args.horizon:
+                print(f"[Single-Shot] ERROR: Not enough data to evaluate prediction!")
+                print(f"[Single-Shot] Need {args.horizon} future steps, but only {remaining_rows} remain")
+                print(f"[Single-Shot] Current position: {csv_source.current_index}/{csv_source.total_rows}")
+                sys.exit(1)
+            
+            if not args.quiet:
+                print(f"[Single-Shot] Verified {remaining_rows} rows available for evaluation")
+        
+        # Get current data for prediction
+        if csv_source:
+            prediction_df = csv_source.get_history(args.window)
+            prediction_timestamp = csv_source.get_current_timestamp()
+            prediction_position = csv_source.current_index
+        else:
+            prediction_df = get_data_from_api(args.ip, args.context, args.dimension, args.window)
+            prediction_timestamp = prediction_df.index[-1]
+            prediction_position = None
+        
+        # Make ONE prediction
+        predictions = forecaster.forecast_step(prediction_df['value'])
+        
+        if not args.quiet:
+            print(f"[Single-Shot] Prediction made at {prediction_timestamp}")
+            print(f"[Single-Shot] Horizon: {args.horizon} steps")
+            print(f"[Single-Shot] Predictions: {[f'{p:.3f}' for p in predictions]}")
+        
+        # Prepare historical data for visualization
+        # In single-shot CSV mode, send ALL data before the prediction point
+        # In live mode, send only the prediction window
+        if csv_source:
+            # Send all data from start (0) up to the prediction point
+            # Get data directly from the dataframe without using get_history
+            hist_df = csv_source.df.iloc[0:prediction_position].copy()
+            
+            # Remap timestamps to current simulation time
+            hist_df.index = [csv_source._csv_to_current_time(ts) for ts in hist_df.index]
+            
+            historical_data = [
+                {
+                    'timestamp': ts.isoformat(),
+                    'value': float(val)
+                }
+                for ts, val in zip(hist_df.index, hist_df['value'].values)
+            ]
+            
+            if not args.quiet:
+                print(f"[Single-Shot] Sending {len(historical_data)} historical data points to visualization")
+        else:
+            historical_data = [
+                {
+                    'timestamp': ts.isoformat(),
+                    'value': float(val)
+                }
+                for ts, val in zip(prediction_df.index, prediction_df['value'].values)
+            ]
+        
+        # Now advance through the data to collect actuals for evaluation
+        actual_values = []
+        actual_timestamps = []
+        if csv_source:
+            # Fast-forward through CSV to collect actuals
+            for step in range(args.horizon):
+                csv_source.current_index += 1
+                if csv_source.is_finished():
+                    print(f"[Single-Shot] ERROR: Ran out of data at step {step+1}/{args.horizon}")
+                    sys.exit(1)
+                
+                step_df = csv_source.get_history(1)
+                actual_values.append(float(step_df['value'].iloc[-1]))
+                actual_timestamps.append(step_df.index[-1])
+            
+            if not args.quiet:
+                print(f"[Single-Shot] Collected {len(actual_values)} actual values")
+        else:
+            # Live mode - wait for real time to pass
+            if not args.quiet:
+                print(f"[Single-Shot] Waiting {args.horizon * args.prediction_interval} seconds for actual data...")
+            
+            for step in range(args.horizon):
+                time.sleep(args.prediction_interval)
+                step_df = get_data_from_api(args.ip, args.context, args.dimension, 1)
+                actual_values.append(float(step_df['value'].iloc[-1]))
+                actual_timestamps.append(step_df.index[-1])
+        
+        # Generate prediction timestamps
+        # Infer the actual time interval from the data
+        if csv_source is not None and len(prediction_df) >= 2:
+            # Calculate interval from last two points
+            data_interval = int((prediction_df.index[-1] - prediction_df.index[-2]).total_seconds())
+        else:
+            # Use prediction_interval parameter
+            data_interval = int(args.prediction_interval)
+        
+        pred_timestamps = pd.date_range(
+            start=prediction_timestamp + pd.Timedelta(seconds=data_interval),
+            periods=args.horizon,
+            freq=f'{data_interval}s'
+        )
+        
+        if not args.quiet:
+            print(f"[Single-Shot] Sample prediction timestamps: {pred_timestamps[:3].tolist()}")
+        
+        # Build prediction payload for visualization
+        pred_payload = []
+        for i, (ts, pred_val) in enumerate(zip(pred_timestamps, predictions)):
+            # Add uncertainty bands based on recent errors (if available)
+            if hasattr(forecaster, 'recent_errors') and len(forecaster.recent_errors) > 0:
+                recent_avg_error = np.mean(list(forecaster.recent_errors)[-10:])
+                uncertainty_pct = min(recent_avg_error, 50.0) / 100.0
+            else:
+                uncertainty_pct = 0.20  # default 20%
+            
+            pred_payload.append({
+                'timestamp': ts.isoformat(),
+                'value': float(pred_val),
+                'min': float(pred_val * (1 - uncertainty_pct)),
+                'max': float(pred_val * (1 + uncertainty_pct)),
+                'actual': float(actual_values[i]) if i < len(actual_values) else None
+            })
+        
+        # Calculate errors for each step
+        errors = []
+        for i, (pred, actual) in enumerate(zip(predictions, actual_values)):
+            err_abs = abs(actual - pred)
+            denominator = (abs(actual) + abs(pred)) / 2.0
+            
+            if denominator < 1e-6:
+                mape = 0.0
+            else:
+                mape = (err_abs / denominator) * 100.0
+                mape = min(mape, 1000.0)  # Cap at 1000%
+            
+            errors.append(mape)
+            
+            if not args.quiet:
+                print(f"[Single-Shot] Step {i+1}/{args.horizon}: Pred={pred:.3f}, Actual={actual:.3f}, MAPE={mape:.2f}%")
+        
+        # Calculate mean error across horizon
+        mean_error = float(np.mean(errors))
+        
+        # Send to visualization server if running
+        if server_started:
+            try:
+                # Prepare future actual data for visualization
+                future_actuals = [
+                    {
+                        'timestamp': ts.isoformat(),
+                        'value': float(val)
+                    }
+                    for ts, val in zip(actual_timestamps, actual_values)
+                ]
+                
+                requests.post(
+                    f'http://localhost:{args.live_server_port}/predictions',
+                    json={
+                        'predictions': pred_payload,
+                        'context': args.context,
+                        'dimension': args.dimension,
+                        'prediction_interval': args.prediction_interval,
+                        'timestamp': prediction_timestamp.isoformat(),
+                        'backoff': False,
+                        'actual': float(prediction_df['value'].iloc[-1]),
+                        'csv_mode': csv_source is not None,
+                        'historical_data': historical_data,
+                        'future_actuals': future_actuals,  # NEW: actual future data
+                        'single_shot': True,  # NEW: flag for single-shot mode
+                        'mean_error': mean_error
+                    },
+                    timeout=2.0
+                )
+                if not args.quiet:
+                    print(f"\n[Single-Shot] Visualization updated - check http://localhost:{args.live_server_port}/")
+            except Exception as e:
+                if not args.quiet:
+                    print(f"[Single-Shot] Could not update visualization: {e}")
+        
+        print(f"\n[Single-Shot] RESULTS:")
+        print(f"  Prediction Timestamp: {prediction_timestamp}")
+        print(f"  Horizon: {args.horizon} steps")
+        print(f"  Mean MAPE: {mean_error:.2f}%")
+        print(f"  Min Error: {min(errors):.2f}%")
+        print(f"  Max Error: {max(errors):.2f}%")
+        print(f"  Std Dev: {np.std(errors):.2f}%")
+        
+        if server_started:
+            print(f"\n[Single-Shot] Visualization server is running.")
+            print(f"[Single-Shot] View results at: http://localhost:{args.live_server_port}/")
+            print(f"[Single-Shot] Press Ctrl+C to exit.")
+            
+            # Keep running to allow user to view visualization
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print(f"\n[Single-Shot] Shutting down...")
+        else:
+            print(f"\n[Single-Shot] Complete. Exiting.")
+        
+        sys.exit(0)
 
     # Start live server if enabled
     if not args.no_live_server:
@@ -255,16 +693,49 @@ def main():
 
     # Main forecasting loop
     next_iteration_time = time.time()
+    csv_last_timestamp = None
+    
     try:
         while True:
+            # Check if CSV mode has finished
+            if csv_source and csv_source.is_finished():
+                print("\n[CSV Mode] Reached end of CSV data. Exiting.")
+                break
 
-            # Get current data
-            live_df = get_data_from_api(
-                args.ip, args.context, args.dimension, args.window)
+            # Get current data based on mode
+            if csv_source:
+                # CSV Mode
+                live_df = csv_source.get_history(args.window)
+                current_timestamp = csv_source.get_current_timestamp()
+                
+                # Advance to next row for next iteration
+                csv_source.current_index += 1
+                
+                # Calculate sleep time for normal replay (use prediction_interval)
+                if not args.csv_fast:
+                    # In normal mode, use the configured prediction_interval
+                    # (Don't use actual CSV timestamp differences as they could be from months ago)
+                    time.sleep(args.prediction_interval)
+                # else: fast mode - no sleep
+                
+                csv_last_timestamp = current_timestamp
+                
+            else:
+                # Live API Mode
+                live_df = get_data_from_api(
+                    args.ip, args.context, args.dimension, args.window)
 
             live_df_value = live_df['value']
             # Forecast
             predictions = forecaster.forecast_step(live_df_value)
+            
+            if not args.quiet and csv_source:
+                # Compact single-line status for CSV mode
+                backoff_status = "BACKOFF" if getattr(forecaster, '_backoff_active', False) else "ACTIVE"
+                latest_err = getattr(forecaster, '_latest_validation_error', None)
+                err_display = f"{latest_err:.1f}%" if latest_err is not None else "N/A"
+                threshold = getattr(forecaster, '_current_threshold', args.retrain_error_min)
+                print(f"\r[CSV {csv_source.current_index:04d}/{csv_source.total_rows}] {backoff_status:8s} | Err: {err_display:6s} / Thr: {threshold:.1f}% | Pred: {predictions[0]:.2f}", end='', flush=True)
 
             pred_timestamps = np.arange(
                 live_df.index[-1] + dt.timedelta(seconds=1),
@@ -362,6 +833,7 @@ def main():
 
                     contributors_s = [_sanitize_num(c) for c in contributors]
                     agg_s = _sanitize_num(agg) if agg is not None else None
+                    val_s = _sanitize_num(val)  # Sanitize the raw prediction value
 
                     if agg_finalized:
                         out_value = agg_s
@@ -372,11 +844,33 @@ def main():
                             if c is not None:
                                 out_value = c
                                 break
+                        
+                        # If no contributors, use the raw prediction value
+                        if out_value is None:
+                            out_value = val_s
 
                     # compute min/max from sanitized contributors (if any)
                     contrib_vals = [c for c in contributors_s if c is not None]
-                    min_v = float(min(contrib_vals)) if contrib_vals else None
-                    max_v = float(max(contrib_vals)) if contrib_vals else None
+                    
+                    # If we have multiple contributors, use their range
+                    if len(contrib_vals) > 1:
+                        min_v = float(min(contrib_vals))
+                        max_v = float(max(contrib_vals))
+                    # If only one contributor or raw prediction, add synthetic uncertainty based on recent errors
+                    elif contrib_vals or val_s is not None:
+                        base_val = contrib_vals[0] if contrib_vals else val_s
+                        # Use recent error to estimate uncertainty (default to 20% if no errors)
+                        if hasattr(forecaster, 'recent_errors') and len(forecaster.recent_errors) > 0:
+                            recent_avg_error = np.mean(list(forecaster.recent_errors)[-10:])  # last 10 errors
+                            uncertainty_pct = min(recent_avg_error, 50.0) / 100.0  # cap at 50%
+                        else:
+                            uncertainty_pct = 0.20  # default 20% uncertainty
+                        
+                        min_v = float(base_val * (1 - uncertainty_pct))
+                        max_v = float(base_val * (1 + uncertainty_pct))
+                    else:
+                        min_v = None
+                        max_v = None
 
                     pred_payload.append({
                         'timestamp': ts.isoformat(),
@@ -388,6 +882,21 @@ def main():
                         'max': max_v
                     })
                 # print(f"[SEND] Sending {len(pred_payload)} predictions: " + ', '.join([f"{p['timestamp']}" for p in pred_payload]))
+                
+                # Prepare historical data for CSV mode
+                historical_data = None
+                if csv_source:
+                    # Send recent historical data (last 60 points for chart)
+                    hist_window = min(60, len(live_df_value))
+                    hist_df = live_df_value.tail(hist_window)
+                    historical_data = [
+                        {
+                            'timestamp': ts.isoformat(),
+                            'value': float(val)
+                        }
+                        for ts, val in zip(hist_df.index, hist_df.values)
+                    ]
+                
                 requests.post(
                     f'http://localhost:{args.live_server_port}/predictions',
                     json={
@@ -397,7 +906,9 @@ def main():
                         'prediction_interval': args.prediction_interval,
                         'timestamp': live_df_value.index[-1].isoformat(),
                         'backoff': in_backoff,
-                        'actual': current_value
+                        'actual': current_value,
+                        'csv_mode': csv_source is not None,
+                        'historical_data': historical_data
                     },
                     # Give the local prediction server a bit more time to respond
                     timeout=2.0
@@ -406,14 +917,24 @@ def main():
                 print(e)
                 pass
 
-
-            next_iteration_time += args.prediction_interval
-            sleep_time = next_iteration_time - time.time()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            # Handle timing based on mode
+            if csv_source:
+                # CSV Mode timing
+                if args.csv_fast:
+                    # Fast mode - no sleep, process as fast as possible
+                    pass
+                else:
+                    # Normal mode - sleep handled earlier based on CSV timestamps
+                    pass
             else:
-                # If we're behind schedule, skip ahead to next interval
-                next_iteration_time = time.time()
+                # Live API mode - respect prediction interval
+                next_iteration_time += args.prediction_interval
+                sleep_time = next_iteration_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    # If we're behind schedule, skip ahead to next interval
+                    next_iteration_time = time.time()
 
     except KeyboardInterrupt:
         if not args.quiet:

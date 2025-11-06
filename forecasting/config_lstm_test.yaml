@@ -1,0 +1,35 @@
+# LSTM Model Test Configuration
+# Tests LSTM with drop-in compatibility
+
+# Data source
+csv-file: realistic_week.csv
+single-shot: true
+
+# Model configuration
+model: lstm
+horizon: 3000
+window: 10000
+train-window: 10000        # Much larger training window (vs 100)
+random-state: 42
+
+# LSTM-specific parameters
+lookback: 120        # Number of past timesteps to use (2 minutes)
+hidden-size: 64      # LSTM hidden layer size
+num-layers: 2        # Number of LSTM layers
+dropout: 0.2         # Dropout rate
+learning-rate: 0.001 # Training learning rate
+epochs: 30           # Number of training epochs (reduced for faster testing)
+batch-size: 32       # Training batch size
+
+# Forecaster parameters
+# retrain-consec: 3
+# retrain-cooldown: 10
+# retrain-scale: 3.0
+# retrain-min: 50.0
+# prediction-smoothing: 3
+# print-min-validations: 3
+prediction-interval: 60.0
+
+# Visualization
+live-server: true
+server-port: 5001

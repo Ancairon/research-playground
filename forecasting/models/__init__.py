@@ -8,6 +8,8 @@ from models.xgboost_model import XGBoostModel
 from models.prophet_model import ProphetModel
 from models.prophet_auto_model import ProphetAutoModel
 from models.lstm_model import LSTMModel
+from models.random_forest_model import RandomForestModel
+from models.extra_trees_model import ExtraTreesModel
 
 
 # Registry of available models
@@ -16,6 +18,10 @@ MODEL_REGISTRY: Dict[str, Type[BaseTimeSeriesModel]] = {
     'prophet': ProphetModel,
     'prophet-auto': ProphetAutoModel,
     'lstm': LSTMModel,
+    'randomforest': RandomForestModel,
+    'rf': RandomForestModel,  # Alias
+    'extratrees': ExtraTreesModel,
+    'et': ExtraTreesModel,  # Alias
 }
 
 

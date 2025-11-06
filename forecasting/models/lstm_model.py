@@ -106,20 +106,37 @@ class LSTMModel(BaseTimeSeriesModel):
         
         self.scaler = MinMaxScaler()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.last_data = None
         
         # Set random seeds
         torch.manual_seed(random_state)
         np.random.seed(random_state)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(random_state)
         
     def train(self, data: pd.Series, **kwargs) -> float:
         """Train LSTM model."""
         start_time = time.time()
+        
+        # Validate data size
+        if len(data) < self.lookback + self.horizon:
+            raise ValueError(
+                f"Insufficient data for training. Need at least {self.lookback + self.horizon} points, "
+                f"got {len(data)}. Consider reducing lookback or horizon."
+            )
         
         # Scale data
         data_scaled = self.scaler.fit_transform(data.values.reshape(-1, 1)).flatten()
         
         # Create dataset
         dataset = TimeSeriesDataset(data_scaled, self.lookback, self.horizon)
+        
+        if len(dataset) == 0:
+            raise ValueError(
+                f"No training samples created. Data length: {len(data)}, "
+                f"lookback: {self.lookback}, horizon: {self.horizon}"
+            )
+        
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
         
         # Create model
@@ -135,21 +152,25 @@ class LSTMModel(BaseTimeSeriesModel):
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         
-        # Training loop
+        # Training loop (suppress verbose output)
         self.model.train()
-        for epoch in range(self.epochs):
-            epoch_loss = 0.0
-            for X_batch, y_batch in dataloader:
-                X_batch = X_batch.unsqueeze(-1).to(self.device)  # Add feature dimension
-                y_batch = y_batch.to(self.device)
-                
-                optimizer.zero_grad()
-                predictions = self.model(X_batch)
-                loss = criterion(predictions, y_batch)
-                loss.backward()
-                optimizer.step()
-                
-                epoch_loss += loss.item()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for epoch in range(self.epochs):
+                epoch_loss = 0.0
+                batch_count = 0
+                for X_batch, y_batch in dataloader:
+                    X_batch = X_batch.unsqueeze(-1).to(self.device)  # Add feature dimension
+                    y_batch = y_batch.to(self.device)
+                    
+                    optimizer.zero_grad()
+                    predictions = self.model(X_batch)
+                    loss = criterion(predictions, y_batch)
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                    batch_count += 1
         
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]
@@ -161,9 +182,15 @@ class LSTMModel(BaseTimeSeriesModel):
         if not self.is_trained or self.model is None:
             raise RuntimeError("Model must be trained before prediction")
         
+        if self.last_data is None or len(self.last_data) < self.lookback:
+            raise RuntimeError(
+                f"Insufficient data for prediction. Need {self.lookback} points, "
+                f"got {len(self.last_data) if self.last_data is not None else 0}"
+            )
+        
         self.model.eval()
         with torch.no_grad():
-            X = torch.FloatTensor(self.last_data).unsqueeze(0).unsqueeze(-1).to(self.device)
+            X = torch.FloatTensor(self.last_data[-self.lookback:]).unsqueeze(0).unsqueeze(-1).to(self.device)
             predictions_scaled = self.model(X).cpu().numpy().flatten()
         
         # Inverse transform
@@ -174,14 +201,26 @@ class LSTMModel(BaseTimeSeriesModel):
         """
         Update last_data window for prediction.
         
-        Note: LSTM does NOT support online learning.
-        To incorporate new data, you must call train() again.
+        Note: LSTM does NOT support true online learning like XGBoost.
+        This method only updates the input window for the next prediction.
+        To incorporate new patterns, you must call train() again (full retrain).
         """
-        if self.scaler is None:
+        if not self.is_trained or self.scaler is None:
+            # If not trained yet, just store the data for later
+            warnings.warn("Model not trained yet. Update will be applied after training.")
             return
         
-        data_scaled = self.scaler.transform(data.values.reshape(-1, 1)).flatten()
-        self.last_data = data_scaled[-self.lookback:]
+        try:
+            # Transform new data and append to last_data window
+            data_scaled = self.scaler.transform(data.values.reshape(-1, 1)).flatten()
+            
+            if self.last_data is None:
+                self.last_data = data_scaled[-self.lookback:]
+            else:
+                # Append new data and keep only last lookback points
+                self.last_data = np.concatenate([self.last_data, data_scaled])[-self.lookback:]
+        except Exception as e:
+            warnings.warn(f"Update failed: {e}. Predictions may be inaccurate.")
     
     def get_model_name(self) -> str:
         return "LSTM (PyTorch)"
