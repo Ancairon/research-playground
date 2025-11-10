@@ -1,7 +1,7 @@
 """
 Universal time series forecasting main entry point.
 
-Supports multiple models: XGBoost, Prophet, LSTM/GRU
+Supports multiple models: XGBoost, LSTM/GRU
 Model selection via command-line argument.
 Config files supported via --config flag.
 """
@@ -184,21 +184,33 @@ def main():
     parser.add_argument('--random-state', type=int, default=42,
                         help='Random seed')
     
-    # LSTM-specific parameters
+    # LSTM/GRU/LSTM-Attention shared parameters
     parser.add_argument('--lookback', type=int, default=60,
-                        help='LSTM: Number of past timesteps to use as input')
+                        help='LSTM/GRU/LSTM-Attn: Number of past timesteps to use as input')
     parser.add_argument('--hidden-size', type=int, default=64,
-                        help='LSTM: Hidden layer size')
+                        help='LSTM/GRU/LSTM-Attn/TFT: Hidden layer size')
     parser.add_argument('--num-layers', type=int, default=2,
-                        help='LSTM: Number of LSTM layers')
+                        help='LSTM/GRU/LSTM-Attn/TFT: Number of layers')
     parser.add_argument('--dropout', type=float, default=0.2,
-                        help='LSTM: Dropout rate')
+                        help='LSTM/GRU/LSTM-Attn/TFT: Dropout rate')
     parser.add_argument('--learning-rate', type=float, default=0.001,
-                        help='LSTM: Learning rate')
+                        help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Learning rate')
     parser.add_argument('--epochs', type=int, default=50,
-                        help='LSTM: Number of training epochs')
+                        help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=32,
-                        help='LSTM: Training batch size')
+                        help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Training batch size')
+    
+    # N-BEATS specific parameters
+    parser.add_argument('--num-stacks', type=int, default=2,
+                        help='N-BEATS: Number of stacks')
+    parser.add_argument('--num-blocks', type=int, default=3,
+                        help='N-BEATS: Number of blocks per stack')
+    parser.add_argument('--theta-size', type=int, default=8,
+                        help='N-BEATS: Theta dimension for basis expansion')
+    
+    # TFT specific parameters
+    parser.add_argument('--num-heads', type=int, default=4,
+                        help='TFT: Number of attention heads')
     
     
     # Random Forest / Extra Trees parameters
@@ -340,7 +352,7 @@ def main():
     }
 
     # Add model-specific parameters
-    if args.model == 'lstm':
+    if args.model in ['lstm', 'gru', 'lstm-attention', 'lstm-attn']:
         model_kwargs['lookback'] = args.lookback
         model_kwargs['hidden_size'] = args.hidden_size
         model_kwargs['num_layers'] = args.num_layers
@@ -348,13 +360,25 @@ def main():
         model_kwargs['learning_rate'] = args.learning_rate
         model_kwargs['epochs'] = args.epochs
         model_kwargs['batch_size'] = args.batch_size
-    elif args.model in ['prophet', 'prophet-auto']:
-        model_kwargs['seasonality_mode'] = args.seasonality_mode
-        if args.model == 'prophet-auto':
-            model_kwargs['auto_detect'] = args.auto_detect
-            model_kwargs['top_seasonalities'] = args.top_seasonalities
-            model_kwargs['min_period'] = args.min_period
-            model_kwargs['max_period'] = args.max_period
+    elif args.model == 'nbeats':
+        model_kwargs['lookback'] = args.lookback
+        model_kwargs['num_stacks'] = args.num_stacks
+        model_kwargs['num_blocks'] = args.num_blocks
+        model_kwargs['theta_size'] = args.theta_size
+        model_kwargs['hidden_size'] = args.hidden_size
+        model_kwargs['learning_rate'] = args.learning_rate
+        model_kwargs['epochs'] = args.epochs
+        model_kwargs['batch_size'] = args.batch_size
+    elif args.model == 'tft':
+        model_kwargs['lookback'] = args.lookback
+        model_kwargs['hidden_size'] = args.hidden_size
+        model_kwargs['num_heads'] = args.num_heads
+        model_kwargs['num_layers'] = args.num_layers
+        model_kwargs['dropout'] = args.dropout
+        model_kwargs['learning_rate'] = args.learning_rate
+        model_kwargs['epochs'] = args.epochs
+        model_kwargs['batch_size'] = args.batch_size
+
     elif args.model in ['randomforest', 'rf', 'extratrees', 'et']:
         model_kwargs['n_estimators'] = args.n_estimators
         model_kwargs['max_depth'] = args.max_depth

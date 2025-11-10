@@ -1,0 +1,29 @@
+# LSTM with Attention Test Configuration
+# Enhanced LSTM with attention mechanism for better long-range dependencies
+
+# Data source
+csv-file: realistic_week.csv
+single-shot: true
+
+# Model selection
+model: lstm-attention
+
+# Training configuration
+horizon: 3000
+window: 10000
+train-window: 10000
+random-state: 42
+
+# LSTM-Attention hyperparameters
+lookback: 60
+hidden-size: 64
+num-layers: 2
+dropout: 0.2
+learning-rate: 0.001
+epochs: 50
+batch-size: 32
+
+# Visualization
+prediction-interval: 60.0
+live-server: true
+server-port: 5000

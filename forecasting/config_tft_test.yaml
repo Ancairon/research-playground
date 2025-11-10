@@ -1,0 +1,30 @@
+# Temporal Fusion Transformer Test Configuration
+# State-of-the-art architecture with multi-head attention and gating
+
+# Data source
+csv-file: realistic_week.csv
+single-shot: true
+
+# Model selection
+model: tft
+
+# Training configuration
+horizon: 3000
+window: 10000
+train-window: 10000
+random-state: 42
+
+# TFT hyperparameters
+lookback: 120
+hidden-size: 128
+num-heads: 4
+num-layers: 2
+dropout: 0.1
+learning-rate: 0.001
+epochs: 50
+batch-size: 32
+
+# Visualization
+prediction-interval: 60.0
+live-server: true
+server-port: 5000

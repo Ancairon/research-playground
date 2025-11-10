@@ -1,0 +1,14 @@
+csv-file: moderate_uptrend_10day.csv
+column: value
+model: lstm-attention
+single-shot: true
+train-window: 10000
+horizon: 3000
+lookback: 120
+hidden-size: 128
+num-layers: 3
+dropout: 0.2
+learning-rate: 0.001
+epochs: 30
+batch-size: 32
+server-port: 5000

@@ -332,9 +332,11 @@ class LSTMTuner:
         config = best['config']
         
         yaml_config = {
+            'csv-file': self.csv_file,
+            'column': 'value',
             'model': 'lstm',
+            'single-shot': True,
             'horizon': self.horizon,
-            'window': self.inference_window,
             'train-window': self.train_window,
             
             # Best LSTM parameters
@@ -346,28 +348,21 @@ class LSTMTuner:
             'epochs': config['epochs'],
             'batch-size': config['batch_size'],
             
-            # Standard forecaster settings
-            'retrain-consec': 3,
-            'retrain-cooldown': 10,
-            'retrain-scale': 3.0,
-            'retrain-min': 50.0,
-            'prediction-smoothing': 3,
-            
-            # Metadata (as comments would be nice, but just fields for now)
-            '_tuning_mape': float(best['mape']),
-            '_tuning_rmse': float(best['rmse']),
-            '_tuning_train_time': float(best['train_time']),
+            # Server
+            'server-port': 5000,
         }
         
         with open(output_file, 'w') as f:
-            f.write(f"# Auto-generated optimal LSTM configuration\n")
-            f.write(f"# Tuned on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Best MAPE: {best['mape']:.2f}%\n")
-            f.write(f"# Best RMSE: {best['rmse']:.2f}\n")
-            f.write(f"# Training time: {best['train_time']:.2f}s\n\n")
-            yaml.dump(yaml_config, f, default_flow_style=False)
+            f.write(f"# LSTM Best Configuration\n")
+            f.write(f"# Generated: {datetime.now().isoformat()}\n")
+            f.write(f"# MAPE: {best['mape']:.2f}%\n")
+            f.write(f"# RMSE: {best['rmse']:.2f}\n")
+            f.write(f"# Train Time: {best['train_time']:.1f}s\n\n")
+            yaml.dump(yaml_config, f, default_flow_style=False, sort_keys=False)
         
-        print(f"✓ Best config saved to {output_file}")
+        print(f"\n✓ Best config saved to: {output_file}")
+        print(f"You can now run: python forecast_main.py --config {output_file}")
+
 
 
 def main():

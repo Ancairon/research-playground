@@ -12,7 +12,7 @@ class BaseTimeSeriesModel(ABC):
     """
     Abstract base class for time series forecasting models.
     
-    Any model (XGBoost, Prophet, LSTM, etc.) must implement these methods
+    Any model (XGBoost, LSTM, etc.) must implement these methods
     to be compatible with the universal forecaster framework.
     """
     
@@ -63,7 +63,7 @@ class BaseTimeSeriesModel(ABC):
         Update the model with new data (online learning if supported).
         
         Some models (XGBoost with PyCaret) support incremental updates.
-        Others (Prophet, LSTM) may need full retraining.
+        Others (LSTM) may need full retraining.
         
         Args:
             data: New time series data

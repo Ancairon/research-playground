@@ -5,23 +5,28 @@ Model factory - creates forecasting models by name.
 from typing import Dict, Any, Type
 from models.base_model import BaseTimeSeriesModel
 from models.xgboost_model import XGBoostModel
-from models.prophet_model import ProphetModel
-from models.prophet_auto_model import ProphetAutoModel
 from models.lstm_model import LSTMModel
 from models.random_forest_model import RandomForestModel
 from models.extra_trees_model import ExtraTreesModel
+from models.gru_model import GRUModel
+from models.lstm_attention_model import LSTMAttentionModel
+from models.nbeats_model import NBEATSModel
+from models.tft_model import TFTModel
 
 
 # Registry of available models
 MODEL_REGISTRY: Dict[str, Type[BaseTimeSeriesModel]] = {
     'xgboost': XGBoostModel,
-    'prophet': ProphetModel,
-    'prophet-auto': ProphetAutoModel,
     'lstm': LSTMModel,
     'randomforest': RandomForestModel,
     'rf': RandomForestModel,  # Alias
     'extratrees': ExtraTreesModel,
     'et': ExtraTreesModel,  # Alias
+    'gru': GRUModel,
+    'lstm-attention': LSTMAttentionModel,
+    'lstm-attn': LSTMAttentionModel,  # Alias
+    'nbeats': NBEATSModel,
+    'tft': TFTModel,
 }
 
 
@@ -30,7 +35,7 @@ def create_model(model_name: str, **kwargs) -> BaseTimeSeriesModel:
     Create a forecasting model by name.
     
     Args:
-        model_name: Name of the model ('xgboost', 'prophet', 'lstm')
+        model_name: Name of the model ('xgboost', 'lstm')
         **kwargs: Model-specific parameters
         
     Returns:
