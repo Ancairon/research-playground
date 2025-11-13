@@ -174,6 +174,8 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             for epoch in range(self.epochs):
+                epoch_loss = 0.0
+                num_batches = 0
                 for X_batch, y_batch in dataloader:
                     X_batch = X_batch.unsqueeze(-1).to(self.device)
                     y_batch = y_batch.to(self.device)
@@ -182,7 +184,19 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
                     predictions = self.model(X_batch)
                     loss = criterion(predictions, y_batch)
                     loss.backward()
+                    
+                    # Gradient clipping to prevent exploding gradients
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
                     optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                    num_batches += 1
+                
+                # Print loss every 10 epochs
+                if (epoch + 1) % 10 == 0 or epoch == 0:
+                    avg_loss = epoch_loss / num_batches
+                    print(f"  Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.6f}")
         
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]
@@ -201,6 +215,12 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         with torch.no_grad():
             X = torch.FloatTensor(self.last_data[-self.lookback:]).unsqueeze(0).unsqueeze(-1).to(self.device)
             predictions_scaled = self.model(X).cpu().numpy().flatten()
+        
+        # Debug: Check if predictions are all zeros in scaled space
+        if np.all(predictions_scaled == 0):
+            print(f"WARNING: Model output is all zeros in scaled space!")
+            print(f"  Input data range (scaled): [{self.last_data.min():.4f}, {self.last_data.max():.4f}]")
+            print(f"  Scaler range: [{self.scaler.data_min_[0]:.4f}, {self.scaler.data_max_[0]:.4f}]")
         
         # Inverse transform
         predictions = self.scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()

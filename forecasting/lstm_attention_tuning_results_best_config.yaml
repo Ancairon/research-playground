@@ -1,8 +1,8 @@
-csv-file: moderate_uptrend_10day.csv
-column: value
+csv-file: 10.10.30.177_ram_used.csv
 model: lstm-attention
 single-shot: true
 train-window: 10000
+window: 10000
 horizon: 3000
 lookback: 120
 hidden-size: 128
