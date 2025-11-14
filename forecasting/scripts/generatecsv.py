@@ -16,7 +16,7 @@ def getDataFromAPI(ip, context, dimension, points, out_file: str | None = None, 
                 f"http://{ip}:19999/api/v3/data?"
                 f"contexts={context}&"
                 f"dimensions={dimension}&"
-                f"after=-{60*60*24*7*4*10}&before=0&"
+                f"after=-{60*60*24*7*4*3}&before=0&"
                 f"points={points}&"
                 f"options=seconds,jsonwrap&"
                 f"format=json2"

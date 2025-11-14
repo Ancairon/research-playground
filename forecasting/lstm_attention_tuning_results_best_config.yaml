@@ -1,4 +1,4 @@
-csv-file: 10.10.30.177_ram_used.csv
+csv-file: 192.168.1.123_net_sent_pi.csv
 model: lstm-attention
 single-shot: true
 train-window: 10000
