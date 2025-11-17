@@ -13,8 +13,6 @@ forecasting/
 │   ├── __init__.py           # Model factory & registry
 │   ├── base_model.py         # Abstract base interface
 │   ├── xgboost_model.py      # XGBoost implementation
-│   ├── prophet_model.py      # Prophet implementation
-│   ├── prophet_auto_model.py # Prophet with auto seasonality detection
 │   └── lstm_model.py         # LSTM/GRU implementation
 └── demo/
     ├── live-predictions.html  # Web UI for visualization
@@ -61,8 +59,6 @@ Flask-based WebSocket server for live visualization:
 plug and play model implementations following `BaseTimeSeriesModel` interface:
 
 - **XGBoost**: Fast gradient boosting, supports online learning
-- **Prophet**: Meta's forecasting library for seasonality/trends
-- **Prophet Auto**: Automated seasonality detection from data
 - **LSTM**: PyTorch recurrent neural network for sequences
 
 All models expose:
@@ -79,7 +75,6 @@ All models expose:
 | Model       | Best For                   | Online Learning | Speed     | Predictive |
 |-------------|----------------------------|-----------------|-----------|------------|
 | **XGBoost** | General regression         | ✅ Yes           | ⚡⚡⚡ Fast  | ❌ Reactive |
-| **Prophet** | Periodic/seasonal patterns | ❌ No            | ⚡⚡ Medium | ✅ Yes      |
 | **LSTM**    | Complex sequences          | ❌ No            | ⚡ Slow    | ✅ Yes      |
 
 ## Key Features
@@ -147,7 +142,7 @@ python3 forecast_main.py
 --dimension received        # Metric dimension
 
 # Model configuration
---model {xgboost,prophet,lstm}  # Model selection
+--model {xgboost,lstm}  # Model selection
 --horizon 5                     # Forecast horizon
 --window 300                    # Training window size
 --random-state 42               # Random seed

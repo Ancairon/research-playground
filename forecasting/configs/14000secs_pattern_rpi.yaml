@@ -1,0 +1,19 @@
+# LSTM Best Configuration
+# Generated: 2025-11-17T13:32:45.518535
+# MAPE: 27.35%
+# RMSE: 97.34
+# Train Time: 41.2s
+
+
+model: lstm
+single-shot: true
+horizon: 3000
+train-window: 10000
+lookback: 60
+hidden-size: 32
+num-layers: 2
+dropout: 0.1
+learning-rate: 0.001
+epochs: 30
+batch-size: 32
+server-port: 5000

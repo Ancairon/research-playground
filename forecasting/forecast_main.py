@@ -8,13 +8,14 @@ Config files supported via --config flag.
 
 from universal_forecaster import UniversalForecaster
 from models import create_model, list_available_models, get_model_info
+from config_cache import ConfigFingerprint, load_cached_results, save_cache
 import requests
+import subprocess
 import pandas as pd
 import argparse
 import time
 import sys
 import os
-import signal
 import psutil
 import datetime as dt
 import numpy as np
@@ -115,34 +116,27 @@ class CSVDataSource:
         return history_df
     
     def is_finished(self):
-        """Check if we've reached the end of CSV data."""
+        """Check if we've reached the end of the CSV data."""
         return self.current_index >= self.total_rows
 
 
 def kill_old_prediction_servers():
-    """Kill any existing prediction_server.py processes."""
-    killed_count = 0
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            cmdline = proc.info.get('cmdline')
-            if cmdline and 'prediction_server.py' in ' '.join(cmdline):
-                # Found a prediction server
-                print(
-                    f"[Server] Killing old prediction server (PID {proc.info['pid']})")
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    proc.wait(timeout=2)
-                except psutil.TimeoutExpired:
-                    proc.kill()
-                killed_count += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-
-    if killed_count > 0:
-        print(f"[Server] Killed {killed_count} old server(s)\n")
-        time.sleep(1)  # Give ports time to release
-
-    return killed_count
+    """Kill any old prediction_server.py processes to avoid port conflicts."""
+    try:
+        current_pid = os.getpid()
+        for proc in psutil.process_iter(attrs=["pid", "name", "cmdline"]):
+            try:
+                pid = proc.info["pid"]
+                if pid == current_pid:
+                    continue
+                cmdline = proc.info.get("cmdline") or []
+                if any("prediction_server.py" in part for part in cmdline):
+                    proc.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    except ImportError:
+        # psutil not available; skip process cleanup
+        pass
 
 
 def main():
@@ -286,6 +280,8 @@ def main():
                         help='Single-shot mode: train once, predict once, evaluate, and exit')
     parser.add_argument('--single-shot-skip-live-server', action='store_true',
                         help='Skip live server in single-shot mode (auto-enabled if --single-shot)')
+    parser.add_argument('--ignore-cache', action='store_true',
+                        help='Ignore cached results and force recomputation')
 
     # Parse command line args first
     args = parser.parse_args()
@@ -308,6 +304,16 @@ def main():
                 print(f"Error: Unsupported config file format: {ext}")
                 print("Supported formats: .yaml, .yml, .json")
                 sys.exit(1)
+        
+        # If csv-file is not specified in config, infer it from config filename
+        if 'csv-file' not in config and 'csv_file' not in config:
+            # Extract basename without extension from config path
+            config_basename = os.path.splitext(os.path.basename(config_path))[0]
+            # Try to find a matching CSV file
+            inferred_csv = f"{config_basename}.csv"
+            config['csv-file'] = inferred_csv
+            if not args.quiet:
+                print(f"[Config] Inferred CSV file from config name: {inferred_csv}")
         
         # Override args with config values
         # Map config keys to argument names
@@ -386,6 +392,12 @@ def main():
         model_kwargs['min_samples_leaf'] = args.min_samples_leaf
         model_kwargs['max_features'] = args.max_features
 
+    # Build fingerprint & hash for caching (after all args are finalized)
+    fingerprint = ConfigFingerprint.from_args(args)
+    config_hash = fingerprint.hash()
+    if not args.quiet:
+        print(f"[Cache] Config hash: {config_hash}")
+
     model = create_model(args.model, **model_kwargs)
 
     # Determine training window (use train_window if specified, otherwise window)
@@ -436,17 +448,105 @@ def main():
     forecaster.aggregation_method = args.aggregation_method
     forecaster.aggregation_weight_tau = args.aggregation_weight_tau
 
-    # Get initial training data
-    if csv_source:
-        init_df = csv_source.get_history(train_window)['value']
-    else:
-        init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
-
-    # Initial training
-    forecaster.train_initial(init_df)
-
     # === SINGLE-SHOT MODE ===
     if args.single_shot:
+        # Check cache before doing any heavy work (unless --ignore-cache is set)
+        if not args.ignore_cache:
+            cached = load_cached_results(config_hash)
+            if cached is not None:
+                if not args.quiet:
+                    print("\n[Cache] Hit - using cached results for this configuration.")
+                    print(f"[Cache] Hash: {config_hash}")
+
+                # Print cached summary
+                print("\n[Single-Shot] CACHED RESULTS:")
+                print(f"  Prediction Timestamp: {cached.get('prediction_timestamp')}")
+                print(f"  Horizon: {cached.get('horizon')} steps")
+                mean_mape = cached.get('mean_mape')
+                if mean_mape is not None:
+                    print(f"  Mean MAPE: {mean_mape:.2f}%")
+                print(f"  Min Error: {cached.get('min_error')}%")
+                print(f"  Max Error: {cached.get('max_error')}%")
+                print(f"  Std Dev: {cached.get('std_error')}")
+
+                # Start prediction server with cached results if not skipped
+                if not args.single_shot_skip_live_server and not args.no_live_server:
+                    kill_old_prediction_servers()
+                    server_cmd = [
+                        'python3', 'prediction_server.py',
+                        '--port', str(args.live_server_port),
+                        '--ip', args.ip if not csv_source else 'csv-mode',
+                        '--context', args.context if not csv_source else args.csv_file,
+                        '--dimension', args.dimension if not csv_source else f"model={args.model}"
+                    ]
+                    try:
+                        subprocess.Popen(
+                            server_cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            cwd=os.path.dirname(__file__)
+                        )
+                        time.sleep(2)
+                        server_started = True
+                        if not args.quiet:
+                            print(f"\n[Server] Visualization server started on port {args.live_server_port}")
+                    except Exception as e:
+                        if not args.quiet:
+                            print(f"[Server] Could not start: {e}")
+                        server_started = False
+
+                    # Send cached data to visualization server
+                    if server_started:
+                        try:
+                            requests.post(
+                                f'http://localhost:{args.live_server_port}/predictions',
+                                json={
+                                    'predictions': cached.get('predictions', []),
+                                    'context': args.context if not csv_source else args.csv_file,
+                                    'dimension': args.dimension if not csv_source else f"model={args.model}",
+                                    'prediction_interval': args.prediction_interval,
+                                    'timestamp': cached.get('prediction_timestamp'),
+                                    'backoff': False,
+                                    'actual': 0.0,  # Not available from cache
+                                    'csv_mode': csv_source is not None,
+                                    'historical_data': cached.get('historical_data', []),
+                                    'future_actuals': cached.get('future_actuals', []),
+                                    'single_shot': True,
+                                    'mean_error': cached.get('mean_mape', 0.0)
+                                },
+                                timeout=2.0
+                            )
+                            if not args.quiet:
+                                print(f"[Cache] Visualization updated with cached results")
+                        except Exception as e:
+                            if not args.quiet:
+                                print(f"[Cache] Could not update visualization: {e}")
+
+                    # Keep server running
+                    if server_started:
+                        print(f"\n[Single-Shot] Visualization server is running.")
+                        print(f"[Single-Shot] View results at: http://localhost:{args.live_server_port}/")
+                        print(f"[Single-Shot] Press Ctrl+C to exit.")
+                        
+                        try:
+                            while True:
+                                time.sleep(1)
+                        except KeyboardInterrupt:
+                            print(f"\n[Single-Shot] Shutting down...")
+                
+                # Exit after showing cached results
+                sys.exit(0)
+
+        # Cache miss or ignored: proceed with normal training flow
+        # Get initial training data
+        if csv_source:
+            init_df = csv_source.get_history(train_window)['value']
+        else:
+            init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
+
+        # Initial training
+        forecaster.train_initial(init_df)
+
         if not args.quiet:
             print("\n[Single-Shot] Mode enabled - making one prediction and evaluating")
         
@@ -454,7 +554,6 @@ def main():
         server_started = False
         if not args.single_shot_skip_live_server and not args.no_live_server:
             kill_old_prediction_servers()
-            import subprocess
             server_cmd = [
                 'python3', 'prediction_server.py',
                 '--port', str(args.live_server_port),
@@ -635,20 +734,28 @@ def main():
                     for ts, val in zip(actual_timestamps, actual_values)
                 ]
                 
+                # In CSV mode, override context/dimension to show run-specific info
+                if csv_source is not None:
+                    ctx = args.csv_file or 'csv-mode'
+                    dim = f"model={args.model}"
+                else:
+                    ctx = args.context
+                    dim = args.dimension
+
                 requests.post(
                     f'http://localhost:{args.live_server_port}/predictions',
                     json={
                         'predictions': pred_payload,
-                        'context': args.context,
-                        'dimension': args.dimension,
+                        'context': ctx,
+                        'dimension': dim,
                         'prediction_interval': args.prediction_interval,
                         'timestamp': prediction_timestamp.isoformat(),
                         'backoff': False,
                         'actual': float(prediction_df['value'].iloc[-1]),
                         'csv_mode': csv_source is not None,
                         'historical_data': historical_data,
-                        'future_actuals': future_actuals,  # NEW: actual future data
-                        'single_shot': True,  # NEW: flag for single-shot mode
+                        'future_actuals': future_actuals,
+                        'single_shot': True,
                         'mean_error': mean_error
                     },
                     timeout=2.0
@@ -659,6 +766,22 @@ def main():
                 if not args.quiet:
                     print(f"[Single-Shot] Could not update visualization: {e}")
         
+        # Save results to cache
+        results_payload = {
+            "prediction_timestamp": prediction_timestamp.isoformat(),
+            "horizon": args.horizon,
+            "mean_mape": float(mean_error),
+            "min_error": float(min(errors)),
+            "max_error": float(max(errors)),
+            "std_error": float(np.std(errors)),
+            "predictions": pred_payload,
+            "historical_data": historical_data,
+            "future_actuals": future_actuals,
+        }
+        save_cache(config_hash, fingerprint, results_payload)
+        if not args.quiet:
+            print(f"[Cache] Saved results to cache (hash: {config_hash[:16]}...)")
+        
         print(f"\n[Single-Shot] RESULTS:")
         print(f"  Prediction Timestamp: {prediction_timestamp}")
         print(f"  Horizon: {args.horizon} steps")
@@ -666,7 +789,7 @@ def main():
         print(f"  Min Error: {min(errors):.2f}%")
         print(f"  Max Error: {max(errors):.2f}%")
         print(f"  Std Dev: {np.std(errors):.2f}%")
-        
+
         if server_started:
             print(f"\n[Single-Shot] Visualization server is running.")
             print(f"[Single-Shot] View results at: http://localhost:{args.live_server_port}/")
@@ -688,7 +811,6 @@ def main():
         # Kill any old prediction servers first
         kill_old_prediction_servers()
 
-        import subprocess
         server_cmd = [
             'python3', 'prediction_server.py',
             '--port', str(args.live_server_port),

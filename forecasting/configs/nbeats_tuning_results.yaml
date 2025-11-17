@@ -1,0 +1,117 @@
+timestamp: '2025-11-07T11:05:15.471536'
+csv_file: csv/realistic_week.csv
+horizon: 3000
+train_window: 10000
+total_configs: 2
+results:
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - &id001 !!python/object/apply:numpy.dtype
+    args:
+    - f8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    hmqbwAZEQkA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    bqmDMKV4G0A=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    nB9WDZabMUA=
+  train_time: 402.30764269828796
+  config:
+    lookback: 120
+    num_stacks: 2
+    num_blocks: 3
+    theta_size: 8
+    hidden_size: 256
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 4.862879276275635
+  - 4.995655536651611
+  - 5.128261566162109
+  - 5.260696887969971
+  - 5.392960548400879
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    VvLIJMyjSUA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    nBcUo/EjIEA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    AUgxPP29OUA=
+  train_time: 250.96574449539185
+  config:
+    lookback: 180
+    num_stacks: 2
+    num_blocks: 3
+    theta_size: 8
+    hidden_size: 256
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 26.01886749267578
+  - 26.105331420898438
+  - 26.19169807434082
+  - 26.277976989746094
+  - 26.364158630371094
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=

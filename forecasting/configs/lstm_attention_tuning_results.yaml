@@ -1,0 +1,787 @@
+timestamp: '2025-11-07T12:42:19.506142'
+csv_file: csv/realistic_week.csv
+horizon: 3000
+train_window: 10000
+total_configs: 16
+results:
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - &id001 !!python/object/apply:numpy.dtype
+    args:
+    - f8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    9UkIZ01IQUA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    0AAEOYqXF0A=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    exdJNKr6MEA=
+  train_time: 492.0375998020172
+  config:
+    lookback: 120
+    hidden_size: 128
+    num_layers: 3
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 36.82386016845703
+  - 37.402652740478516
+  - 35.78693771362305
+  - 35.42884826660156
+  - 35.43651580810547
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    TxsX2tonQkA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    0rz2p6JxIUA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    Cg0ncfGeM0A=
+  train_time: 131.5657618045807
+  config:
+    lookback: 60
+    hidden_size: 64
+    num_layers: 3
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 27.299148559570312
+  - 26.269866943359375
+  - 27.61336326599121
+  - 27.82382583618164
+  - 26.93017578125
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    +5N51j+vQkA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    cv+RCfDmHUA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    pDoI04oCNEA=
+  train_time: 236.13318753242493
+  config:
+    lookback: 120
+    hidden_size: 64
+    num_layers: 3
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 41.73221969604492
+  - 42.313636779785156
+  - 40.69519805908203
+  - 42.28917694091797
+  - 40.97050094604492
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    bsnvy+1lQ0A=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    LQJ2aPwUGUA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    dX6x2tkvMkA=
+  train_time: 249.24264097213745
+  config:
+    lookback: 60
+    hidden_size: 128
+    num_layers: 3
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 27.215354919433594
+  - 28.49774169921875
+  - 29.889020919799805
+  - 27.895034790039062
+  - 28.4929141998291
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    s5huartmQ0A=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    pApZYFvOIkA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    QN9HJbLrNEA=
+  train_time: 77.05726528167725
+  config:
+    lookback: 60
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 26.680395126342773
+  - 29.44892692565918
+  - 29.409061431884766
+  - 29.685823440551758
+  - 30.207857131958008
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    o9yc9krLQ0A=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    iZE4HjUaG0A=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    fBsyrcbaMkA=
+  train_time: 74.72262978553772
+  config:
+    lookback: 60
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 27.122093200683594
+  - 30.112241744995117
+  - 29.8763370513916
+  - 28.35464859008789
+  - 31.084590911865234
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    bTPWfXfMQ0A=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    n/tyRlKiIkA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    +aDTq2O9NEA=
+  train_time: 125.02130436897278
+  config:
+    lookback: 60
+    hidden_size: 64
+    num_layers: 3
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 32.27732849121094
+  - 31.70412254333496
+  - 32.71446228027344
+  - 34.197208404541016
+  - 32.0931282043457
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    UYEIHiziQ0A=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    4DDRwDYwIEA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    jO+Ej+L5M0A=
+  train_time: 161.51285648345947
+  config:
+    lookback: 60
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 30.520172119140625
+  - 30.942325592041016
+  - 27.432186126708984
+  - 28.87592124938965
+  - 26.319074630737305
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    slD4DkkEREA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    B9SIvkAhIUA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    Nzwke6ofN0A=
+  train_time: 479.65936517715454
+  config:
+    lookback: 120
+    hidden_size: 128
+    num_layers: 3
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 38.850746154785156
+  - 38.976158142089844
+  - 36.847206115722656
+  - 38.427364349365234
+  - 37.56795120239258
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    tFoDh810REA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    agxNPKCKGEA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    h8zhLYorNUA=
+  train_time: 320.8250780105591
+  config:
+    lookback: 120
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 48.15243148803711
+  - 49.6185302734375
+  - 50.04869842529297
+  - 48.70418167114258
+  - 47.57611846923828
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    W3Y2pP6CREA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    gXNsKua7G0A=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    J+9z1PCdM0A=
+  train_time: 185.09648442268372
+  config:
+    lookback: 60
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 27.304283142089844
+  - 27.11684226989746
+  - 25.21047592163086
+  - 26.172941207885742
+  - 24.714115142822266
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    w1LsEyZHRUA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    v6jKZMDdE0A=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    CxZ91ZJ5NUA=
+  train_time: 149.467768907547
+  config:
+    lookback: 120
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 54.65406036376953
+  - 56.28195571899414
+  - 51.414268493652344
+  - 52.21889114379883
+  - 51.49860763549805
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    gzxbk1JERkA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    MqLH0i6PIkA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    laTAN/CcN0A=
+  train_time: 255.3996136188507
+  config:
+    lookback: 60
+    hidden_size: 128
+    num_layers: 3
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 33.15152359008789
+  - 34.49594497680664
+  - 36.17274475097656
+  - 34.68439865112305
+  - 36.5007209777832
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    pxyBNEYVSEA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    EDl9lYsTJUA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    6Nqsn9UlO0A=
+  train_time: 167.23811268806458
+  config:
+    lookback: 120
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 49.136985778808594
+  - 48.31169128417969
+  - 48.19488525390625
+  - 46.60491180419922
+  - 47.164207458496094
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    e4TyULdaSUA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    K6+CNfr5JkA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    lnX2ocDbPEA=
+  train_time: 238.60352277755737
+  config:
+    lookback: 120
+    hidden_size: 64
+    num_layers: 3
+    dropout: 0.2
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 31.96428108215332
+  - 32.449310302734375
+  - 31.408475875854492
+  - 33.1959228515625
+  - 32.8126106262207
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=
+- mape: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    N8vrZFBRSkA=
+  mbe: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    K6+CtfUxIEA=
+  rmse: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    7pGJ/oplOEA=
+  train_time: 319.9011242389679
+  config:
+    lookback: 120
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+  predictions:
+  - 40.650794982910156
+  - 40.92168045043945
+  - 40.59503936767578
+  - 40.56975173950195
+  - 40.308048248291016
+  actuals:
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      mpmZmZl5QEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehSOPUA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      vp8aL93kNEA=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      rkfhehTuK0A=
+  - !!python/object/apply:numpy.core.multiarray.scalar
+    - *id001
+    - !!binary |
+      nu+nxks3IkA=

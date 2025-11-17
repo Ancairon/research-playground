@@ -364,8 +364,8 @@ Examples:
     parser.add_argument('--mode', choices=['quick', 'balanced', 'exhaustive', 'auto'],
                         default='auto',
                         help='Tuning mode (default: auto)')
-    parser.add_argument('--output', default='nbeats_tuning_results.yaml',
-                        help='Output file for results (default: nbeats_tuning_results.yaml)')
+    parser.add_argument('--output', default=None,
+                        help='Output file for results (default: same as config file or nbeats_tuning_results.yaml)')
     
     args = parser.parse_args()
     
@@ -373,6 +373,20 @@ Examples:
     if args.config:
         with open(args.config, 'r') as f:
             config = yaml.safe_load(f)
+        
+        # If csv-file is not specified in config, infer it from config filename
+        if 'csv-file' not in config and 'csv_file' not in config:
+            # Extract basename without extension from config path
+            config_basename = os.path.splitext(os.path.basename(args.config))[0]
+            # Infer CSV filename
+            inferred_csv = f"csv/{config_basename}.csv"
+            config['csv-file'] = inferred_csv
+            print(f"[Config] Inferred CSV file from config name: {inferred_csv}")
+        
+        # If output not specified, use the config file as output
+        if args.output is None:
+            args.output = args.config
+            print(f"[Config] Will save results to: {args.output}")
         
         # Override with config values
         if 'csv-file' in config:
@@ -383,6 +397,10 @@ Examples:
             args.train_window = config['train-window']
         
         print(f"Loaded configuration from: {args.config}")
+    
+    # Set default output if still not specified
+    if args.output is None:
+        args.output = 'nbeats_tuning_results.yaml'
     
     if not args.csv_file:
         print("ERROR: Must specify --csv or --config")

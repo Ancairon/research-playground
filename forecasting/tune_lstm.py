@@ -382,8 +382,8 @@ def main():
                         help='Search strategy (default: auto - intelligently adapts to your data)')
     parser.add_argument('--max-time', type=int, default=300,
                         help='Max seconds per config (default: 300)')
-    parser.add_argument('--output', type=str, default='tuning_results.json',
-                        help='Output file for results (default: tuning_results.json)')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output file for results (default: same as config file or tuning_results.json)')
     
     args = parser.parse_args()
     
@@ -392,7 +392,26 @@ def main():
     if args.config:
         with open(args.config, 'r') as f:
             config = yaml.safe_load(f)
+        
+        # If csv-file is not specified in config, infer it from config filename
+        if 'csv-file' not in config and 'csv_file' not in config:
+            # Extract basename without extension from config path
+            config_basename = os.path.splitext(os.path.basename(args.config))[0]
+            # Infer CSV filename
+            inferred_csv = f"csv/{config_basename}.csv"
+            config['csv-file'] = inferred_csv
+            print(f"[Config] Inferred CSV file from config name: {inferred_csv}")
+        
+        # If output not specified, use the config file as output
+        if args.output is None:
+            args.output = args.config
+            print(f"[Config] Will save results to: {args.output}")
+        
         print(f"Loaded base configuration from {args.config}")
+    
+    # Set default output if still not specified
+    if args.output is None:
+        args.output = 'tuning_results.json'
     
     # Override with command-line arguments (command line takes precedence)
     csv_file = args.csv_file or config.get('csv-file')
