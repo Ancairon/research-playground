@@ -19,6 +19,7 @@ from itertools import product
 import argparse
 
 from models import create_model
+from config_cache import ConfigFingerprint, load_cached_results, save_cache
 
 
 class LSTMAttentionTuner:
@@ -199,14 +200,21 @@ class LSTMAttentionTuner:
                     'mape': float('inf')
                 }
             
-            # MAPE
+            # Calculate sMAPE (symmetric MAPE) - same as forecaster
             errors = []
             for actual, pred in zip(actuals, predictions):
-                if abs(actual) > 1e-6:
-                    errors.append(abs(actual - pred) / abs(actual) * 100.0)
+                err_abs = abs(actual - pred)
+                denominator = (abs(actual) + abs(pred)) / 2.0
+                
+                if denominator < 1e-6:
+                    mape_val = 0.0
+                else:
+                    mape_val = (err_abs / denominator) * 100.0
+                    mape_val = min(mape_val, 1000.0)  # Cap at 1000%
+                
+                errors.append(mape_val)
             
             mape = np.mean(errors) if errors else float('inf')
-            mape = min(mape, 1000.0)
             
             # MBE
             mbe = np.mean([actual - pred for actual, pred in zip(actuals, predictions)])
@@ -423,20 +431,18 @@ Examples:
     # Save results
     tuner.save_results(results, args.output)
     
-    # Save best config as ready-to-use YAML
+    # Save best config as ready-to-use YAML (overwrite the original config file)
     if results and 'error' not in results[0]:
         best = results[0]
         
-        # Create best config file
-        best_config_file = args.output.replace('.yaml', '_best_config.yaml').replace('.json', '_best_config.yaml')
+        # Use the original config file
+        best_config_file = args.output
         best_config = {
             '# LSTM-Attention Best Configuration': None,
             '# Generated': datetime.now().isoformat(),
             '# MAPE': f"{best['mape']:.2f}%",
             '# RMSE': f"{best['rmse']:.2f}",
             '# Train Time': f"{best['train_time']:.1f}s",
-            'csv-file': args.csv_file,
-            'column': 'value',
             'model': 'lstm-attention',
             'single-shot': True,
             'train-window': args.train_window,
@@ -466,11 +472,51 @@ Examples:
         
         print(f"\n✓ Best config saved to: {best_config_file}")
         
+        # Save to cache system (same as forecast_main.py would use)
+        # Create a temporary args-like object with the best config
+        class TempArgs:
+            def __init__(self):
+                self.model = 'lstm-attention'
+                self.csv_file = args.csv_file
+                self.ip = None
+                self.context = None
+                self.dimension = None
+                self.window = args.train_window
+                self.train_window = args.train_window
+                self.horizon = args.horizon
+                self.lookback = best['config']['lookback']
+                self.hidden_size = best['config']['hidden_size']
+                self.num_layers = best['config']['num_layers']
+                self.dropout = best['config']['dropout']
+                self.learning_rate = best['config']['learning_rate']
+                self.epochs = best['config']['epochs']
+                self.batch_size = best['config']['batch_size']
+                self.prediction_smoothing = 0
+                self.aggregation_method = 'weighted'
+                self.aggregation_weight_tau = 300.0
+        
+        temp_args = TempArgs()
+        fingerprint = ConfigFingerprint.from_args(temp_args)
+        config_hash = fingerprint.hash()
+        
+        # Save minimal cache results
+        cache_results = {
+            "tuning_mode": True,
+            "best_mape": float(best['mape']),
+            "best_rmse": float(best['rmse']),
+            "train_time": float(best['train_time']),
+            "config": best['config'],
+        }
+        save_cache(config_hash, fingerprint, cache_results)
+        print(f"✓ Results cached (hash: {config_hash[:16]}...)")
+        
         # Print best config
         print(f"\n{'='*70}")
         print("BEST CONFIGURATION:")
         print(f"{'='*70}")
         print(f"\nMAPE: {best['mape']:.2f}%")
+        print(f"RMSE: {best['rmse']:.2f}")
+        print(f"Train Time: {best['train_time']:.1f}s")
         print("\nParameters:")
         for key, val in best['config'].items():
             print(f"  {key}: {val}")

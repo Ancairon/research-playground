@@ -20,6 +20,7 @@ import argparse
 
 from models import create_model
 from universal_forecaster import UniversalForecaster
+from config_cache import ConfigFingerprint, load_cached_results, save_cache
 
 
 class LSTMTuner:
@@ -208,14 +209,21 @@ class LSTMTuner:
                     'mape': float('inf')
                 }
             
-            # MAPE
+            # Calculate sMAPE (symmetric MAPE) - same as forecaster
             errors = []
             for actual, pred in zip(actuals, predictions):
-                if abs(actual) > 1e-6:
-                    errors.append(abs(actual - pred) / abs(actual) * 100.0)
+                err_abs = abs(actual - pred)
+                denominator = (abs(actual) + abs(pred)) / 2.0
+                
+                if denominator < 1e-6:
+                    mape_val = 0.0
+                else:
+                    mape_val = (err_abs / denominator) * 100.0
+                    mape_val = min(mape_val, 1000.0)  # Cap at 1000%
+                
+                errors.append(mape_val)
             
             mape = np.mean(errors) if errors else float('inf')
-            mape = min(mape, 1000.0)  # Cap at 1000%
             
             # MBE
             mbe = np.mean([actual - pred for actual, pred in zip(actuals, predictions)])
@@ -260,6 +268,7 @@ class LSTMTuner:
         print(f"Search space: {search_space}\n")
         
         results = []
+        best_mape_so_far = float('inf')
         
         for i, config in enumerate(all_configs, 1):
             print(f"\n[{i}/{len(all_configs)}] Testing configuration:")
@@ -276,6 +285,11 @@ class LSTMTuner:
             
             if 'error' not in result:
                 print(f"  ✓ MAPE: {result['mape']:.2f}%, RMSE: {result['rmse']:.2f}, Time: {result['train_time']:.2f}s")
+                
+                # Track best result for progress indication
+                if result['mape'] < best_mape_so_far:
+                    print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
+                    best_mape_so_far = result['mape']
             else:
                 print(f"  ✗ Error: {result['error']}")
             
@@ -332,8 +346,6 @@ class LSTMTuner:
         config = best['config']
         
         yaml_config = {
-            'csv-file': self.csv_file,
-            'column': 'value',
             'model': 'lstm',
             'single-shot': True,
             'horizon': self.horizon,
@@ -361,7 +373,54 @@ class LSTMTuner:
             yaml.dump(yaml_config, f, default_flow_style=False, sort_keys=False)
         
         print(f"\n✓ Best config saved to: {output_file}")
-        print(f"You can now run: python forecast_main.py --config {output_file}")
+        
+        # Save to cache system
+        class TempArgs:
+            def __init__(self):
+                self.model = 'lstm'
+                self.csv_file = self.csv_file_val
+                self.ip = None
+                self.context = None
+                self.dimension = None
+                self.window = self.train_window_val
+                self.train_window = self.train_window_val
+                self.horizon = self.horizon_val
+                self.lookback = config['lookback']
+                self.hidden_size = config['hidden_size']
+                self.num_layers = config['num_layers']
+                self.dropout = config['dropout']
+                self.learning_rate = config['learning_rate']
+                self.epochs = config['epochs']
+                self.batch_size = config['batch_size']
+                self.prediction_smoothing = 0
+                self.aggregation_method = 'weighted'
+                self.aggregation_weight_tau = 300.0
+        
+        temp_args = TempArgs()
+        temp_args.csv_file_val = self.csv_file
+        temp_args.train_window_val = self.train_window
+        temp_args.horizon_val = self.horizon
+        fingerprint = ConfigFingerprint.from_args(temp_args)
+        config_hash = fingerprint.hash()
+        
+        cache_results = {
+            "tuning_mode": True,
+            "best_mape": float(best['mape']),
+            "best_rmse": float(best['rmse']),
+            "train_time": float(best['train_time']),
+            "config": best['config'],
+        }
+        save_cache(config_hash, fingerprint, cache_results)
+        print(f"✓ Results cached (hash: {config_hash[:16]}...)")
+        
+        # Print best config summary
+        print(f"\n{'='*70}")
+        print("BEST CONFIGURATION:")
+        print(f"{'='*70}")
+        print(f"MAPE: {best['mape']:.2f}%")
+        print(f"RMSE: {best['rmse']:.2f}")
+        print(f"Train Time: {best['train_time']:.1f}s")
+        print(f"\nYou can now run: python forecast_main.py --config {output_file}")
 
 
 
@@ -466,8 +525,8 @@ def main():
     # Save results
     tuner.save_results(results, args.output)
     
-    # Create best config
-    tuner.create_best_config_yaml(results)
+    # Create best config (overwrite the original config file)
+    tuner.create_best_config_yaml(results, output_file=args.output)
     
     print("\n" + "="*100)
     print("TUNING COMPLETE")

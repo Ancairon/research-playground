@@ -395,8 +395,10 @@ def main():
     # Build fingerprint & hash for caching (after all args are finalized)
     fingerprint = ConfigFingerprint.from_args(args)
     config_hash = fingerprint.hash()
+    readable_name = fingerprint.get_readable_name()
     if not args.quiet:
-        print(f"[Cache] Config hash: {config_hash}")
+        print(f"[Cache] Config name: {readable_name}")
+        print(f"[Cache] Config hash: {config_hash[:16]}...")
 
     model = create_model(args.model, **model_kwargs)
 
@@ -452,11 +454,13 @@ def main():
     if args.single_shot:
         # Check cache before doing any heavy work (unless --ignore-cache is set)
         if not args.ignore_cache:
-            cached = load_cached_results(config_hash)
+            readable_name = fingerprint.get_readable_name()
+            cached = load_cached_results(config_hash, readable_name)
             if cached is not None:
                 if not args.quiet:
                     print("\n[Cache] Hit - using cached results for this configuration.")
-                    print(f"[Cache] Hash: {config_hash}")
+                    print(f"[Cache] Name: {readable_name}")
+                    print(f"[Cache] Hash: {config_hash[:16]}...")
 
                 # Print cached summary
                 print("\n[Single-Shot] CACHED RESULTS:")
@@ -544,11 +548,14 @@ def main():
         else:
             init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
 
-        # Initial training
+        # Initial training with timing
+        train_start = time.time()
         forecaster.train_initial(init_df)
+        train_time = time.time() - train_start
 
         if not args.quiet:
             print("\n[Single-Shot] Mode enabled - making one prediction and evaluating")
+            print(f"[Single-Shot] Training completed in {train_time:.2f}s")
         
         # Start live server for visualization (unless explicitly disabled)
         server_started = False
@@ -600,11 +607,14 @@ def main():
             prediction_timestamp = prediction_df.index[-1]
             prediction_position = None
         
-        # Make ONE prediction
+        # Make ONE prediction with timing
+        inference_start = time.time()
         predictions = forecaster.forecast_step(prediction_df['value'])
+        inference_time = time.time() - inference_start
         
         if not args.quiet:
             print(f"[Single-Shot] Prediction made at {prediction_timestamp}")
+            print(f"[Single-Shot] Inference completed in {inference_time:.4f}s")
             print(f"[Single-Shot] Horizon: {args.horizon} steps")
             print(f"[Single-Shot] Predictions: {[f'{p:.3f}' for p in predictions]}")
         
@@ -789,6 +799,12 @@ def main():
         print(f"  Min Error: {min(errors):.2f}%")
         print(f"  Max Error: {max(errors):.2f}%")
         print(f"  Std Dev: {np.std(errors):.2f}%")
+        
+        # Format timing outputs
+        train_time_str = f"{train_time:.2f}s" if train_time < 60 else f"{train_time/60:.2f}m"
+        inference_time_str = f"{inference_time*1000:.2f}ms" if inference_time < 1 else f"{inference_time:.2f}s"
+        print(f"  Train Time: {train_time_str}")
+        print(f"  Inference Time: {inference_time_str}")
 
         if server_started:
             print(f"\n[Single-Shot] Visualization server is running.")

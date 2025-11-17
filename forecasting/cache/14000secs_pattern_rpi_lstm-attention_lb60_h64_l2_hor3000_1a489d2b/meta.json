@@ -1,0 +1,24 @@
+{
+  "hash": "1a489d2b208196b70ee9fdc833c8171f1df43042d1200f96274a6176df5b8591",
+  "readable_name": "14000secs_pattern_rpi_lstm-attention_lb60_h64_l2_hor3000",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 32,
+    "context": "ip.tcppackets",
+    "csv_file": "14000secs_pattern_rpi.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 20,
+    "hidden_size": 64,
+    "horizon": 3000,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "train_window": 10000,
+    "window": 25
+  }
+}
