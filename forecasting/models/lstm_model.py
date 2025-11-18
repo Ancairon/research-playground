@@ -157,6 +157,11 @@ class LSTMModel(BaseTimeSeriesModel):
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         
+        # Early stopping setup
+        best_loss = float('inf')
+        patience = 5
+        patience_counter = 0
+        
         # Training loop (suppress verbose output)
         self.model.train()
         with warnings.catch_warnings():
@@ -176,6 +181,17 @@ class LSTMModel(BaseTimeSeriesModel):
                     
                     epoch_loss += loss.item()
                     batch_count += 1
+                
+                avg_loss = epoch_loss / batch_count
+                
+                # Early stopping check
+                if avg_loss < best_loss - 1e-6:
+                    best_loss = avg_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        break
         
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]

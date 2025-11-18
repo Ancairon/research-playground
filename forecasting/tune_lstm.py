@@ -59,85 +59,77 @@ class LSTMTuner:
             search_type: 'quick', 'balanced', 'exhaustive', or 'auto'
         """
         if search_type == 'auto':
-            # Intelligent auto-tuning based on data size and horizon
-            # Adapts parameter ranges to the problem
+            # Smart auto-tuning based on problem characteristics
             data_size = len(self.df)
+            max_lookback = min(500, self.train_window // 4)
             
-            # Lookback: between 10% and 100% of horizon, capped by data size
-            max_lookback = min(self.horizon * 2, self.train_window // 2)
-            lookback_values = [
-                max(30, self.horizon // 10),  # Small: 10% of horizon
-                max(60, self.horizon // 5),   # Medium: 20% of horizon
-                max(120, self.horizon // 2),  # Large: 50% of horizon
-            ]
-            lookback_values = [lb for lb in lookback_values if lb <= max_lookback]
-            if not lookback_values:
-                lookback_values = [60]
-            
-            # Hidden size: scale with complexity
-            if self.horizon < 100:
-                hidden_sizes = [32, 64]
-            elif self.horizon < 1000:
-                hidden_sizes = [32, 64, 128]
-            else:
-                hidden_sizes = [64, 128, 256]
-            
-            # Layers: more layers for complex patterns
-            if self.horizon < 500:
+            if self.horizon <= 100:
+                lookback_values = [30, 60]
                 num_layers = [1, 2]
+            elif self.horizon <= 1000:
+                lookback_values = [60, 120, 180]
+                num_layers = [2]
             else:
+                lookback_values = [120, 180, 240, 300]
                 num_layers = [2, 3]
             
-            # Epochs: balance training time vs accuracy
-            if data_size > 5000:
-                epochs = [30, 50]
+            lookback_values = [lb for lb in lookback_values if lb <= max_lookback]
+            if not lookback_values:
+                lookback_values = [min(120, max_lookback)]
+            
+            # Scale model size with data availability
+            if data_size < 2000:
+                hidden_sizes = [32, 64]
+            elif data_size < 5000:
+                hidden_sizes = [64, 128] if self.horizon <= 1000 else [128, 256]
             else:
-                epochs = [40, 60]
+                hidden_sizes = [128, 256] if self.horizon <= 1000 else [256, 512]
             
             return {
                 'lookback': lookback_values,
                 'hidden_size': hidden_sizes,
                 'num_layers': num_layers,
-                'dropout': [0.1, 0.2],
-                'learning_rate': [0.001, 0.002],
-                'epochs': epochs,
-                'batch_size': [32],
+                'dropout': [0.2, 0.3] if data_size < 5000 else [0.3, 0.4],
+                'learning_rate': [0.001],
+                'epochs': [100],  # Will early stop
+                'batch_size': [256 if data_size >= 10000 else 128 if data_size >= 5000 else 64],
             }
+        
         elif search_type == 'quick':
-            # Fast exploration - 12 configurations
+            # Fast exploration (4 configurations)
             return {
                 'lookback': [60, 120],
-                'hidden_size': [32, 64],
-                'num_layers': [1, 2],
-                'dropout': [0.1, 0.2],
+                'hidden_size': [64],
+                'num_layers': [2],
+                'dropout': [0.2],
                 'learning_rate': [0.001],
-                'epochs': [20, 30],
+                'epochs': [50],
                 'batch_size': [32],
             }
+        
         elif search_type == 'balanced':
-            # Medium exploration - ~100 configurations
+            # Medium exploration (16 configurations)
             return {
-                'lookback': [60, 120, 180],
-                'hidden_size': [32, 64, 128],
-                'num_layers': [1, 2, 3],
+                'lookback': [60, 120],
+                'hidden_size': [64, 128],
+                'num_layers': [2, 3],
+                'dropout': [0.2],
+                'learning_rate': [0.001, 0.0005],
+                'epochs': [50],
+                'batch_size': [32],
+            }
+        
+        else:  # exhaustive
+            # Comprehensive search (240 combinations)
+            return {
+                'lookback': [30, 60, 120, 180],
+                'hidden_size': [32, 64, 128, 256],
+                'num_layers': [2, 3, 4],
                 'dropout': [0.1, 0.2, 0.3],
-                'learning_rate': [0.0005, 0.001, 0.002],
-                'epochs': [20, 40],
-                'batch_size': [16, 32],
+                'learning_rate': [0.0005, 0.001],
+                'epochs': [50],
+                'batch_size': [32],
             }
-        elif search_type == 'exhaustive':
-            # Full exploration - 1000+ configurations
-            return {
-                'lookback': [30, 60, 120, 180, 240],
-                'hidden_size': [16, 32, 64, 128, 256],
-                'num_layers': [1, 2, 3, 4],
-                'dropout': [0.0, 0.1, 0.2, 0.3, 0.4],
-                'learning_rate': [0.0001, 0.0005, 0.001, 0.002, 0.005],
-                'epochs': [10, 20, 40, 60, 100],
-                'batch_size': [8, 16, 32, 64],
-            }
-        else:
-            raise ValueError(f"Unknown search_type: {search_type}")
     
     def evaluate_config(self, config, verbose=True):
         """
@@ -350,6 +342,7 @@ class LSTMTuner:
             'single-shot': True,
             'horizon': self.horizon,
             'train-window': self.train_window,
+            'window': self.inference_window,
             
             # Best LSTM parameters
             'lookback': config['lookback'],
@@ -382,7 +375,7 @@ class LSTMTuner:
                 self.ip = None
                 self.context = None
                 self.dimension = None
-                self.window = self.train_window_val
+                self.window = self.inference_window_val
                 self.train_window = self.train_window_val
                 self.horizon = self.horizon_val
                 self.lookback = config['lookback']
@@ -399,6 +392,7 @@ class LSTMTuner:
         temp_args = TempArgs()
         temp_args.csv_file_val = self.csv_file
         temp_args.train_window_val = self.train_window
+        temp_args.inference_window_val = self.inference_window
         temp_args.horizon_val = self.horizon
         fingerprint = ConfigFingerprint.from_args(temp_args)
         config_hash = fingerprint.hash()

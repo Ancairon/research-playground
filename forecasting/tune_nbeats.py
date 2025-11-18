@@ -33,12 +33,12 @@ class NBEATSTuner:
             csv_file: Path to CSV data file
             horizon: Forecast horizon (fixed)
             train_window: Training window size (fixed)
-            inference_window: Inference window size (not used in tuning)
+            inference_window: Inference window size (lookback for predictions)
         """
         self.csv_file = csv_file
         self.horizon = horizon
         self.train_window = train_window
-        self.inference_window = train_window
+        self.inference_window = inference_window
         
         # Load data (handle relative paths)
         if not os.path.isabs(csv_file):
@@ -58,58 +58,50 @@ class NBEATSTuner:
             search_type: 'quick', 'balanced', 'exhaustive', or 'auto'
         """
         if search_type == 'auto':
-            # Intelligent auto-tuning based on data size and horizon
+            # Smart auto-tuning based on problem characteristics
             data_size = len(self.df)
+            # N-BEATS benefits from longer lookback for trend/seasonality decomposition
+            max_lookback = min(800, self.train_window // 4)
             
-            # Lookback: N-BEATS benefits from longer lookback
-            max_lookback = min(self.horizon * 3, self.train_window // 2)
-            lookback_values = [
-                max(60, self.horizon // 5),   # Small
-                max(120, self.horizon // 2),  # Medium
-                max(180, self.horizon),       # Large (at least horizon length)
-            ]
+            if self.horizon <= 100:
+                lookback_values = [60, 120]
+                num_stacks = [2]
+                num_blocks = [2]
+            elif self.horizon <= 1000:
+                lookback_values = [120, 180, 240]
+                num_stacks = [2]
+                num_blocks = [3]
+            else:
+                # Long-term: need more lookback for pattern decomposition
+                lookback_values = [180, 240, 360, 480]
+                num_stacks = [2, 3]
+                num_blocks = [3, 4]
+            
             lookback_values = [lb for lb in lookback_values if lb <= max_lookback]
             if not lookback_values:
-                lookback_values = [120]
+                lookback_values = [min(180, max_lookback)]
             
-            # Stack configuration
-            if self.horizon < 500:
-                num_stacks = [2]
-                num_blocks = [2, 3]
-            elif self.horizon < 2000:
-                num_stacks = [2, 3]
-                num_blocks = [3, 4]
+            # Scale model size with data availability
+            if data_size < 2000:
+                hidden_sizes = [128]
+            elif data_size < 5000:
+                hidden_sizes = [256]
             else:
-                num_stacks = [2, 3]
-                num_blocks = [3, 4]
-            
-            # Theta size (basis expansion degree)
-            theta_sizes = [4, 8, 16]
-            
-            # Hidden size
-            if self.horizon < 1000:
-                hidden_sizes = [128, 256]
-            else:
-                hidden_sizes = [256, 512]
-            
-            # Epochs
-            if data_size > 5000:
-                epochs = [30, 50]
-            else:
-                epochs = [40, 60]
+                hidden_sizes = [256, 512] if self.horizon > 1000 else [256]
             
             return {
                 'lookback': lookback_values,
                 'num_stacks': num_stacks,
                 'num_blocks': num_blocks,
-                'theta_size': theta_sizes,
+                'theta_size': [8, 16] if data_size >= 5000 else [8],
                 'hidden_size': hidden_sizes,
-                'learning_rate': [0.001, 0.0005],
-                'epochs': epochs,
-                'batch_size': [32, 64],
+                'learning_rate': [0.001],
+                'epochs': [100],  # Will early stop
+                'batch_size': [256 if data_size >= 10000 else 128 if data_size >= 5000 else 64],
             }
         
         elif search_type == 'quick':
+            # Fast exploration (2 configurations)
             return {
                 'lookback': [120, 180],
                 'num_stacks': [2],
@@ -117,32 +109,34 @@ class NBEATSTuner:
                 'theta_size': [8],
                 'hidden_size': [256],
                 'learning_rate': [0.001],
-                'epochs': [30],
+                'epochs': [50],
                 'batch_size': [32],
             }
         
         elif search_type == 'balanced':
+            # Medium exploration (24 configurations)
             return {
-                'lookback': [90, 120, 180],
+                'lookback': [120, 180],
                 'num_stacks': [2, 3],
-                'num_blocks': [2, 3, 4],
-                'theta_size': [4, 8, 16],
-                'hidden_size': [128, 256],
+                'num_blocks': [3, 4],
+                'theta_size': [8, 16],
+                'hidden_size': [256],
                 'learning_rate': [0.001, 0.0005],
-                'epochs': [30, 50],
-                'batch_size': [32, 64],
+                'epochs': [50],
+                'batch_size': [32],
             }
         
         else:  # exhaustive
+            # Comprehensive search (360 configurations)
             return {
-                'lookback': [60, 90, 120, 180, 240],
-                'num_stacks': [2, 3, 4],
-                'num_blocks': [2, 3, 4, 5],
-                'theta_size': [4, 8, 16, 32],
+                'lookback': [90, 120, 180, 240],
+                'num_stacks': [2, 3],
+                'num_blocks': [2, 3, 4],
+                'theta_size': [4, 8, 16],
                 'hidden_size': [128, 256, 512],
-                'learning_rate': [0.001, 0.0005, 0.0001],
-                'epochs': [30, 50, 80],
-                'batch_size': [16, 32, 64],
+                'learning_rate': [0.001, 0.0005],
+                'epochs': [50],
+                'batch_size': [32],
             }
     
     def evaluate_config(self, config, verbose=False):
@@ -376,6 +370,8 @@ Examples:
                         help='Forecast horizon (default: 3000)')
     parser.add_argument('--train-window', type=int, default=10000,
                         help='Training window size (default: 10000)')
+    parser.add_argument('--window', type=int, default=None,
+                        help='Inference window size (default: same as train-window)')
     parser.add_argument('--mode', choices=['quick', 'balanced', 'exhaustive', 'auto'],
                         default='auto',
                         help='Tuning mode (default: auto)')
@@ -410,8 +406,14 @@ Examples:
             args.horizon = config['horizon']
         if 'train-window' in config:
             args.train_window = config['train-window']
+        if 'window' in config:
+            args.window = config['window']
         
         print(f"Loaded configuration from: {args.config}")
+    
+    # Set default window if not specified
+    if args.window is None:
+        args.window = args.train_window
     
     # Set default output if still not specified
     if args.output is None:
@@ -426,7 +428,7 @@ Examples:
         csv_file=args.csv_file,
         horizon=args.horizon,
         train_window=args.train_window,
-        inference_window=25  # Not used in tuning
+        inference_window=args.window
     )
     
     # Define search space
@@ -461,6 +463,7 @@ Examples:
             'model': 'nbeats',
             'single-shot': True,
             'train-window': args.train_window,
+            'window': args.window,
             'horizon': args.horizon,
         }
         

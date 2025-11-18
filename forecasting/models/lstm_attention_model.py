@@ -65,6 +65,7 @@ class LSTMAttentionNetwork(nn.Module):
         super(LSTMAttentionNetwork, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.horizon = horizon
         
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -77,8 +78,15 @@ class LSTMAttentionNetwork(nn.Module):
         # Attention mechanism
         self.attention = Attention(hidden_size)
         
-        # Output layer
-        self.fc = nn.Linear(hidden_size, horizon)
+        # Multi-layer decoder for better long-horizon predictions
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, horizon)
+        )
         
     def forward(self, x):
         # x shape: (batch, seq_len, features)
@@ -87,8 +95,8 @@ class LSTMAttentionNetwork(nn.Module):
         # Apply attention
         context, attn_weights = self.attention(lstm_out)  # context: (batch, hidden_size)
         
-        # Generate predictions
-        predictions = self.fc(context)  # (batch, horizon)
+        # Generate predictions through multi-layer decoder
+        predictions = self.decoder(context)  # (batch, horizon)
         
         return predictions
 
@@ -128,6 +136,10 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.last_data = None
         
+        # Warn if using CPU for large models
+        if not torch.cuda.is_available() and (hidden_size >= 128 or lookback >= 180):
+            print(f"  [WARNING] Training on CPU - large model may be slow. Consider using GPU.")
+        
         # Set random seeds for full reproducibility
         torch.manual_seed(random_state)
         np.random.seed(random_state)
@@ -159,7 +171,15 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         if len(dataset) == 0:
             raise ValueError("No training samples created")
         
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
+        # Use multiple workers for data loading - conservative to avoid memory issues
+        num_workers = 2 if len(dataset) > 2000 else 0
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=False  # Disable on CPU to save memory
+        )
         
         # Create model
         self.model = LSTMAttentionNetwork(
@@ -172,7 +192,17 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         
         # Training setup
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
+        
+        # Learning rate scheduler - reduce LR when loss plateaus
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=3
+        )
+        
+        # Early stopping setup
+        best_loss = float('inf')
+        patience = 7  # Increased patience for pattern learning
+        patience_counter = 0
         
         # Training loop
         self.model.train()
@@ -198,10 +228,25 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
                     epoch_loss += loss.item()
                     num_batches += 1
                 
+                avg_loss = epoch_loss / num_batches
+                
+                # Update learning rate based on loss
+                scheduler.step(avg_loss)
+                
                 # Print loss every 10 epochs
                 if (epoch + 1) % 10 == 0 or epoch == 0:
-                    avg_loss = epoch_loss / num_batches
-                    print(f"  Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.6f}")
+                    current_lr = optimizer.param_groups[0]['lr']
+                    print(f"  Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.6f}, LR: {current_lr:.6f}")
+                
+                # Early stopping check
+                if avg_loss < best_loss - 1e-6:  # Improvement threshold
+                    best_loss = avg_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(f"  Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+                        break
         
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]

@@ -1,11 +1,11 @@
 {
   "tuning_mode": true,
-  "best_mape": 52.775441714368526,
-  "best_rmse": 101.55147343817073,
-  "train_time": 61.25697708129883,
+  "best_mape": 48.66010114733826,
+  "best_rmse": 100.61186378296259,
+  "train_time": 342.8661439418793,
   "config": {
     "lookback": 60,
-    "hidden_size": 64,
+    "hidden_size": 128,
     "num_layers": 2,
     "dropout": 0.2,
     "learning_rate": 0.001,

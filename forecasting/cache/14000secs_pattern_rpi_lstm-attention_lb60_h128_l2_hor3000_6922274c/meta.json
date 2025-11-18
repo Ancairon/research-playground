@@ -1,0 +1,24 @@
+{
+  "hash": "6922274c11c0ae46ce629070892f89025dd353d7e07a7c641fadd77d09eb1d5a",
+  "readable_name": "14000secs_pattern_rpi_lstm-attention_lb60_h128_l2_hor3000",
+  "fingerprint": {
+    "aggregation_method": "recent",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 32,
+    "context": "tuning",
+    "csv_file": "14000secs_pattern_rpi.csv",
+    "dimension": "tuning",
+    "dropout": 0.2,
+    "epochs": 20,
+    "hidden_size": 128,
+    "horizon": 3000,
+    "ip": "tuning",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 0.0,
+    "train_window": 10000,
+    "window": 10000
+  }
+}

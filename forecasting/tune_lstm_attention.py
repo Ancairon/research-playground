@@ -33,12 +33,12 @@ class LSTMAttentionTuner:
             csv_file: Path to CSV data file
             horizon: Forecast horizon (fixed)
             train_window: Training window size (fixed)
-            inference_window: Inference window size (not used in tuning)
+            inference_window: Inference window size (lookback for predictions)
         """
         self.csv_file = csv_file
         self.horizon = horizon
         self.train_window = train_window
-        self.inference_window = train_window
+        self.inference_window = inference_window
         
         # Load data (handle relative paths)
         if not os.path.isabs(csv_file):
@@ -58,76 +58,116 @@ class LSTMAttentionTuner:
             search_type: 'quick', 'balanced', 'exhaustive', or 'auto'
         """
         if search_type == 'auto':
-            # Optimized auto-tuning: fewer combinations, smarter selection
+            # Adaptive auto-tuning: adjusts search space AND count based on problem
             data_size = len(self.df)
             
-            # Lookback: test only 2 values instead of 3
-            max_lookback = min(self.horizon * 2, self.train_window // 2)
-            lookback_values = [
-                max(60, self.horizon // 5),   # Medium
-                max(120, self.horizon // 2),  # Large
-            ]
+            # Lookback: scale with horizon
+            max_lookback = min(500, self.train_window // 4)
+            
+            if self.horizon <= 100:
+                # Short-term: test more lookback options (less critical)
+                lookback_values = [30, 60, 90]
+            elif self.horizon <= 1000:
+                # Medium-term: 2-3 values
+                lookback_values = [60, 120] if data_size < 5000 else [60, 120, 180]
+            else:
+                # Long-term: need MORE lookback for patterns
+                if data_size < 5000:
+                    lookback_values = [180, 240]  # Increased from [120]
+                else:
+                    lookback_values = [180, 240, 300]  # Increased from [120, 180]
+            
             lookback_values = [lb for lb in lookback_values if lb <= max_lookback]
             if not lookback_values:
-                lookback_values = [60]
+                lookback_values = [min(120, max_lookback)]
             
-            # Hidden size: reduce to 2 options
-            if self.horizon < 1000:
+            # Hidden size: scale with data availability
+            if data_size < 2000:
+                # Small data: just 1 size
+                hidden_sizes = [64]
+            elif data_size < 5000:
+                # Medium data: 2 sizes
                 hidden_sizes = [64, 128]
             else:
-                hidden_sizes = [128, 256]
+                # Large data: test 2-3 sizes
+                if self.horizon > 2000:
+                    hidden_sizes = [64, 128, 256]  # 3 for complex problems
+                else:
+                    hidden_sizes = [64, 128]  # 2 for simpler
             
-            # Layers: just 2 options
-            num_layers = [2, 3]
+            # Layers: deeper only with sufficient data
+            if data_size < 5000 or self.horizon < 1000:
+                num_layers = [2]  # Single value for speed
+            else:
+                num_layers = [2, 3]  # Test 2 for complex + large data
             
-            # Dropout: only test 2 values
-            dropout_values = [0.2, 0.3]
+            # Dropout: single value for speed
+            dropout_values = [0.2]
             
-            # Epochs: reduce training time
-            epochs = [30]  # Single value for speed
+            # Epochs: adapt to data size
+            if data_size < 2000:
+                epochs = [30]  # Small data trains fast
+            else:
+                epochs = [40]  # Increased from 20 for better pattern learning
+            
+            # Calculate expected configs (for info only - commented out to avoid iteration issues)
+            # n_configs = (len(lookback_values) * len(hidden_sizes) * 
+            #             len(num_layers) * len(dropout_values))
             
             return {
                 'lookback': lookback_values,
                 'hidden_size': hidden_sizes,
                 'num_layers': num_layers,
                 'dropout': dropout_values,
-                'learning_rate': [0.001],  # Single value
+                'learning_rate': [0.001],
                 'epochs': epochs,
-                'batch_size': [32],  # Single value
+                'batch_size': [128 if data_size >= 5000 else 64],
+            }
+            
+            return {
+                'lookback': lookback_values,
+                'hidden_size': hidden_sizes,
+                'num_layers': num_layers,
+                'dropout': dropout_values,
+                'learning_rate': [0.001],
+                'epochs': epochs,
+                'batch_size': [128 if data_size >= 5000 else 64],
             }
         
         elif search_type == 'quick':
-            # Ultra-fast: minimal combinations
+            # Ultra-fast: 5 configurations
             return {
                 'lookback': [60, 120],
                 'hidden_size': [64, 128],
                 'num_layers': [2],
                 'dropout': [0.2],
                 'learning_rate': [0.001],
-                'epochs': [20],  # Reduced from 30
-                'batch_size': [32],
+                'epochs': [30],
+                'batch_size': [128],
             }
         
         elif search_type == 'balanced':
+            # Balanced: 15 configurations
             return {
-                'lookback': [60, 120],
+                'lookback': [60, 120, 180],
                 'hidden_size': [64, 128],
-                'num_layers': [2, 3],
-                'dropout': [0.2, 0.3],
-                'learning_rate': [0.001],
-                'epochs': [30],
-                'batch_size': [32],
+                'num_layers': [2],
+                'dropout': [0.2],
+                'learning_rate': [0.001, 0.0005],
+                'epochs': [50],
+                'batch_size': [128],
             }
         
         else:  # exhaustive
+            # Comprehensive search (still pruned from original)
             return {
-                'lookback': [30, 45, 60, 90, 120, 150],
-                'hidden_size': [32, 64, 96, 128, 192, 256],
-                'num_layers': [1, 2, 3, 4],
-                'dropout': [0.1, 0.15, 0.2, 0.25, 0.3],
-                'learning_rate': [0.001, 0.0005, 0.0001],
-                'epochs': [30, 50, 80],
-                'batch_size': [16, 32, 64],
+                'lookback': [30, 60, 90, 120, 180],
+                'hidden_size': [32, 64, 128, 256],
+                'num_layers': [2, 3, 4],
+                'dropout': [0.1, 0.2, 0.3],
+                'learning_rate': [0.001, 0.0005],
+                'epochs': [50],  # Will early stop
+                'batch_size': [32, 64],
             }
     
     def evaluate_config(self, config, verbose=False):
@@ -297,6 +337,7 @@ class LSTMAttentionTuner:
             'csv_file': self.csv_file,
             'horizon': self.horizon,
             'train_window': self.train_window,
+            'window': self.inference_window,
             'total_configs': len(results),
             'results': results
         }
@@ -361,6 +402,8 @@ Examples:
                         help='Forecast horizon (default: 3000)')
     parser.add_argument('--train-window', type=int, default=10000,
                         help='Training window size (default: 10000)')
+    parser.add_argument('--window', type=int, default=None,
+                        help='Inference window size (default: same as train-window)')
     parser.add_argument('--mode', choices=['quick', 'balanced', 'exhaustive', 'auto'],
                         default='auto',
                         help='Tuning mode (default: auto)')
@@ -395,8 +438,14 @@ Examples:
             args.horizon = config['horizon']
         if 'train-window' in config:
             args.train_window = config['train-window']
+        if 'window' in config:
+            args.window = config['window']
         
         print(f"Loaded configuration from: {args.config}")
+    
+    # Set default window if not specified
+    if args.window is None:
+        args.window = args.train_window
     
     # Set default output if still not specified
     if args.output is None:
@@ -411,7 +460,7 @@ Examples:
         csv_file=args.csv_file,
         horizon=args.horizon,
         train_window=args.train_window,
-        inference_window=25  # Not used in tuning
+        inference_window=args.window
     )
     
     # Define search space
@@ -446,6 +495,7 @@ Examples:
             'model': 'lstm-attention',
             'single-shot': True,
             'train-window': args.train_window,
+            'window': args.window,
             'horizon': args.horizon,
         }
         
@@ -481,7 +531,7 @@ Examples:
                 self.ip = None
                 self.context = None
                 self.dimension = None
-                self.window = args.train_window
+                self.window = args.window
                 self.train_window = args.train_window
                 self.horizon = args.horizon
                 self.lookback = best['config']['lookback']

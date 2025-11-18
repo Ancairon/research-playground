@@ -1,0 +1,13 @@
+model: lstm-attention
+single-shot: true
+train-window: 2250000
+window: 2250000
+horizon: 250000
+lookback: 120
+hidden-size: 128
+num-layers: 3
+dropout: 0.2
+learning-rate: 0.001
+epochs: 30
+batch-size: 32
+server-port: 5000
