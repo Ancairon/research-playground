@@ -1,6 +1,11 @@
 """
-LSTM with Attention mechanism for improved long-horizon forecasting.
-Attention allows the model to focus on relevant parts of the input sequence.
+LSTM with Attention Mechanism for Time Series Forecasting
+
+Features:
+- Attention mechanism to focus on relevant historical patterns
+- Multiple scaling options: StandardScaler, None (manual normalization)
+- Bias correction to fix systematic over/under-prediction
+- Differencing mode to learn changes instead of absolute values (eliminates drift)
 """
 
 import time
@@ -12,13 +17,13 @@ import warnings
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 
 from models.base_model import BaseTimeSeriesModel
 
 
 class TimeSeriesDataset(Dataset):
-    """Dataset for sliding window time series."""
+    """Sliding window dataset for time series."""
     
     def __init__(self, data: np.ndarray, lookback: int, horizon: int):
         self.data = data
@@ -26,7 +31,7 @@ class TimeSeriesDataset(Dataset):
         self.horizon = horizon
         
     def __len__(self):
-        return len(self.data) - self.lookback - self.horizon + 1
+        return max(0, len(self.data) - self.lookback - self.horizon + 1)
     
     def __getitem__(self, idx):
         X = self.data[idx:idx + self.lookback]
@@ -35,37 +40,33 @@ class TimeSeriesDataset(Dataset):
 
 
 class Attention(nn.Module):
-    """Attention mechanism for sequence models."""
+    """Scaled dot-product attention for LSTM hidden states."""
     
     def __init__(self, hidden_size: int):
         super(Attention, self).__init__()
-        self.hidden_size = hidden_size
         self.attn = nn.Linear(hidden_size, hidden_size)
         self.v = nn.Linear(hidden_size, 1, bias=False)
         
     def forward(self, hidden_states):
-        # hidden_states: (batch, seq_len, hidden_size)
-        # Calculate attention scores
-        energy = torch.tanh(self.attn(hidden_states))  # (batch, seq_len, hidden_size)
-        attention = self.v(energy).squeeze(-1)  # (batch, seq_len)
-        attention_weights = torch.softmax(attention, dim=1)  # (batch, seq_len)
-        
-        # Apply attention weights
-        # (batch, seq_len, 1) * (batch, seq_len, hidden_size) -> (batch, seq_len, hidden_size)
-        context = attention_weights.unsqueeze(-1) * hidden_states
-        context = context.sum(dim=1)  # (batch, hidden_size)
-        
+        """
+        Args:
+            hidden_states: (batch, seq_len, hidden_size)
+        Returns:
+            context: (batch, hidden_size) - weighted combination of hidden states
+            attention_weights: (batch, seq_len) - attention scores
+        """
+        energy = torch.tanh(self.attn(hidden_states))
+        attention = self.v(energy).squeeze(-1)
+        attention_weights = torch.softmax(attention, dim=1)
+        context = (attention_weights.unsqueeze(-1) * hidden_states).sum(dim=1)
         return context, attention_weights
 
 
 class LSTMAttentionNetwork(nn.Module):
-    """LSTM with Attention for time series forecasting."""
+    """LSTM with attention mechanism for multi-step forecasting."""
     
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, horizon: int, dropout: float = 0.2):
         super(LSTMAttentionNetwork, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.horizon = horizon
         
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -75,10 +76,9 @@ class LSTMAttentionNetwork(nn.Module):
             dropout=dropout if num_layers > 1 else 0
         )
         
-        # Attention mechanism
         self.attention = Attention(hidden_size)
         
-        # Multi-layer decoder for better long-horizon predictions
+        # Multi-layer decoder for horizon predictions
         self.decoder = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -89,24 +89,34 @@ class LSTMAttentionNetwork(nn.Module):
         )
         
     def forward(self, x):
-        # x shape: (batch, seq_len, features)
-        lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
-        
-        # Apply attention
-        context, attn_weights = self.attention(lstm_out)  # context: (batch, hidden_size)
-        
-        # Generate predictions through multi-layer decoder
-        predictions = self.decoder(context)  # (batch, horizon)
-        
+        """
+        Args:
+            x: (batch, seq_len, features)
+        Returns:
+            predictions: (batch, horizon)
+        """
+        lstm_out, _ = self.lstm(x)
+        context, _ = self.attention(lstm_out)
+        predictions = self.decoder(context)
         return predictions
 
 
 class LSTMAttentionModel(BaseTimeSeriesModel):
     """
-    LSTM with Attention mechanism for time series forecasting.
+    LSTM with Attention for time series forecasting.
     
-    Attention allows the model to focus on the most relevant historical points,
-    improving performance on long-horizon forecasts.
+    Args:
+        horizon: Number of steps to predict
+        lookback: Number of historical steps to use
+        hidden_size: LSTM hidden dimension
+        num_layers: Number of LSTM layers
+        dropout: Dropout rate
+        learning_rate: Optimizer learning rate
+        epochs: Training epochs
+        batch_size: Training batch size
+        scaler_type: 'standard' (StandardScaler) or 'none' (manual normalization)
+        bias_correction: Enable bias correction to fix systematic prediction errors
+        use_differencing: Learn changes instead of absolute values (eliminates drift)
     """
     
     def __init__(
@@ -120,9 +130,11 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         learning_rate: float = 0.001,
         epochs: int = 50,
         batch_size: int = 32,
+        scaler_type: str = 'none',
+        bias_correction: bool = False,
+        use_differencing: bool = False,
         **kwargs
     ):
-        """Initialize LSTM with Attention model."""
         super().__init__(horizon, random_state)
         self.lookback = lookback
         self.hidden_size = hidden_size
@@ -131,14 +143,29 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
+        self.scaler_type = scaler_type
+        self.bias_correction = bias_correction
+        self.use_differencing = use_differencing
         
-        self.scaler = MinMaxScaler()
+        # Initialize scaler
+        if scaler_type == 'standard':
+            self.scaler = StandardScaler()
+        elif scaler_type == 'none':
+            self.scaler = None
+        else:
+            raise ValueError(f"Invalid scaler_type: {scaler_type}. Must be 'standard' or 'none'")
+            
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.last_data = None
+        self.last_data_raw = None
+        self.last_value = None
+        self.bias_offset = 0.0
+        self.data_mean = None
+        self.data_std = None
         
         # Warn if using CPU for large models
         if not torch.cuda.is_available() and (hidden_size >= 128 or lookback >= 180):
-            print(f"  [WARNING] Training on CPU - large model may be slow. Consider using GPU.")
+            warnings.warn("Training on CPU - large model may be slow. Consider using GPU.")
         
         # Set random seeds for full reproducibility
         torch.manual_seed(random_state)
@@ -162,8 +189,29 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
                 f"got {len(data)}"
             )
         
-        # Scale data
-        data_scaled = self.scaler.fit_transform(data.values.reshape(-1, 1)).flatten()
+        # Apply differencing if enabled
+        if self.use_differencing:
+            # Store the last value for undifferencing predictions
+            self.last_value = data.values[-1]
+            # Convert to first differences
+            data_values = np.diff(data.values)
+            # Pad with first value to maintain length
+            data_values = np.concatenate([[0], data_values])
+        else:
+            data_values = data.values
+        
+        # Scale data based on scaler type
+        if self.scaler is None:
+            # No scaler - normalize using mean/std for training stability
+            self.data_mean = np.mean(data_values)
+            self.data_std = np.std(data_values)
+            if self.data_std < 1e-8:
+                self.data_std = 1.0  # Prevent division by zero
+            data_scaled = (data_values - self.data_mean) / self.data_std
+            self.last_data_raw = data.values[-self.lookback:]
+        else:
+            # Use StandardScaler
+            data_scaled = self.scaler.fit_transform(data_values.reshape(-1, 1)).flatten()
         
         # Create dataset
         dataset = TimeSeriesDataset(data_scaled, self.lookback, self.horizon)
@@ -250,8 +298,50 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]
+        
+        # Calculate bias correction if enabled
+        if self.bias_correction:
+            self._calculate_bias_correction(data_scaled)
+        
         training_time = time.time() - start_time
         return training_time
+    
+    def _calculate_bias_correction(self, data_scaled: np.ndarray):
+        """
+        Calculate bias offset by comparing predictions to actuals on training data.
+        This helps correct systematic under/over-estimation.
+        """
+        try:
+            self.model.eval()
+            prediction_errors = []
+            
+            # Sample up to 50 windows from training data for bias estimation
+            num_samples = min(50, len(data_scaled) - self.lookback - self.horizon)
+            if num_samples <= 0:
+                self.bias_offset = 0.0
+                return
+                
+            step = max(1, (len(data_scaled) - self.lookback - self.horizon) // num_samples)
+            
+            with torch.no_grad():
+                for i in range(0, len(data_scaled) - self.lookback - self.horizon, step):
+                    X = torch.FloatTensor(data_scaled[i:i+self.lookback]).unsqueeze(0).unsqueeze(-1).to(self.device)
+                    y_true = data_scaled[i+self.lookback:i+self.lookback+self.horizon]
+                    y_pred = self.model(X).cpu().numpy().flatten()
+                    
+                    # Calculate error in scaled space
+                    error = y_true - y_pred
+                    prediction_errors.extend(error)
+            
+            # Calculate mean bias (positive = under-prediction, negative = over-prediction)
+            self.bias_offset = np.mean(prediction_errors)
+            
+            if abs(self.bias_offset) > 0.01:  # Only report significant bias
+                print(f"  Bias correction: {self.bias_offset:.4f} (scaled space)")
+                
+        except Exception as e:
+            print(f"  Warning: Bias correction failed: {e}")
+            self.bias_offset = 0.0
     
     def predict(self, **kwargs) -> List[float]:
         """Generate predictions."""
@@ -266,24 +356,55 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
             X = torch.FloatTensor(self.last_data[-self.lookback:]).unsqueeze(0).unsqueeze(-1).to(self.device)
             predictions_scaled = self.model(X).cpu().numpy().flatten()
         
-        # Debug: Check if predictions are all zeros in scaled space
-        if np.all(predictions_scaled == 0):
-            print(f"WARNING: Model output is all zeros in scaled space!")
-            print(f"  Input data range (scaled): [{self.last_data.min():.4f}, {self.last_data.max():.4f}]")
-            print(f"  Scaler range: [{self.scaler.data_min_[0]:.4f}, {self.scaler.data_max_[0]:.4f}]")
+        # Apply bias correction if enabled
+        if self.bias_correction and abs(self.bias_offset) > 0:
+            predictions_scaled = predictions_scaled + self.bias_offset
         
-        # Inverse transform
-        predictions = self.scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
+        # Inverse transform based on scaler type
+        if self.scaler is None:
+            # No scaler - denormalize using stored mean/std
+            predictions = predictions_scaled * self.data_std + self.data_mean
+        else:
+            # StandardScaler - use inverse_transform
+            predictions = self.scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
+        
+        # Reverse differencing if enabled
+        if self.use_differencing:
+            # Predictions are changes, convert back to absolute values
+            # Start from last known value and accumulate changes
+            absolute_predictions = np.zeros(len(predictions))
+            current_value = self.last_value
+            for i in range(len(predictions)):
+                current_value = current_value + predictions[i]
+                absolute_predictions[i] = current_value
+            predictions = absolute_predictions
+        
         return predictions.tolist()
     
     def update(self, data: pd.Series, **kwargs):
         """Update last_data window for prediction."""
-        if not self.is_trained or self.scaler is None:
+        if not self.is_trained:
             warnings.warn("Model not trained yet")
             return
         
         try:
-            data_scaled = self.scaler.transform(data.values.reshape(-1, 1)).flatten()
+            # Update last_value for differencing
+            if self.use_differencing:
+                self.last_value = data.values[-1]
+                # Convert to differences
+                data_values = np.diff(data.values)
+                if len(data_values) == 0:
+                    return
+            else:
+                data_values = data.values
+            
+            if self.scaler is None:
+                # No scaler - normalize using stored mean/std
+                data_scaled = (data_values - self.data_mean) / self.data_std
+                self.last_data_raw = np.concatenate([self.last_data_raw, data.values])[-self.lookback:]
+            else:
+                # StandardScaler
+                data_scaled = self.scaler.transform(data_values.reshape(-1, 1)).flatten()
             
             if self.last_data is None:
                 self.last_data = data_scaled[-self.lookback:]
@@ -305,6 +426,9 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
             "learning_rate": self.learning_rate,
             "epochs": self.epochs,
             "batch_size": self.batch_size,
+            "scaler_type": self.scaler_type,
+            "bias_correction": self.bias_correction,
+            "use_differencing": self.use_differencing,
             "device": str(self.device),
             "online_learning": False,
             "attention": True

@@ -19,13 +19,13 @@ from itertools import product
 import argparse
 
 from models import create_model
-from config_cache import ConfigFingerprint, load_cached_results, save_cache
+from shared_prediction import evaluate_predictions
 
 
 class NBEATSTuner:
     """Hyperparameter tuner for N-BEATS models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None):
         """
         Initialize tuner.
         
@@ -34,6 +34,7 @@ class NBEATSTuner:
             horizon: Forecast horizon (fixed)
             train_window: Training window size (fixed)
             inference_window: Inference window size (lookback for predictions)
+            max_lookback: Maximum lookback value to search (None = auto)
         """
         self.csv_file = csv_file
         self.horizon = horizon
@@ -47,8 +48,18 @@ class NBEATSTuner:
         self.df['timestamp'] = pd.to_datetime(self.df['timestamp'])
         self.df.set_index('timestamp', inplace=True)
         
-        print(f"Loaded {len(self.df)} data points from {csv_file}")
-        print(f"Will use {self.train_window} points for training, then predict {self.horizon} steps ahead")
+        # Set max_lookback based on available data
+        data_size = len(self.df)
+        if max_lookback is None:
+            # Default: use at most 1/3 of available data for lookback
+            # This leaves 1/3 for training buffer and 1/3 for validation
+            self.max_lookback = max(60, min(600, data_size // 3))
+        else:
+            self.max_lookback = max_lookback
+        
+        print(f"Loaded {data_size} data points from {csv_file}")
+        print(f"Max lookback constrained to: {self.max_lookback} (available data: {data_size})")
+        print(f"Will predict {self.horizon} steps ahead")
         
     def define_search_space(self, search_type='quick'):
         """
@@ -95,7 +106,7 @@ class NBEATSTuner:
                 'num_blocks': num_blocks,
                 'theta_size': [8, 16] if data_size >= 5000 else [8],
                 'hidden_size': hidden_sizes,
-                'learning_rate': [0.001],
+                'learning_rate': [0.001, 0.0005],
                 'epochs': [100],  # Will early stop
                 'batch_size': [256 if data_size >= 10000 else 128 if data_size >= 5000 else 64],
             }
@@ -114,9 +125,22 @@ class NBEATSTuner:
             }
         
         elif search_type == 'balanced':
-            # Medium exploration (24 configurations)
+            # Medium exploration - generate lookback values that scale to max_lookback
+            base_lookbacks = [120, 240, 480]
+            
+            # Add more values scaling up to max_lookback
+            if self.max_lookback > 480:
+                current = 800
+                while current < self.max_lookback:
+                    base_lookbacks.append(current)
+                    current = int(current * 1.5)  # Geometric progression
+                
+                # Always include max_lookback itself
+                if base_lookbacks[-1] != self.max_lookback:
+                    base_lookbacks.append(self.max_lookback)
+            
             return {
-                'lookback': [120, 180],
+                'lookback': sorted(set(base_lookbacks)),
                 'num_stacks': [2, 3],
                 'num_blocks': [3, 4],
                 'theta_size': [8, 16],
@@ -127,9 +151,22 @@ class NBEATSTuner:
             }
         
         else:  # exhaustive
-            # Comprehensive search (360 configurations)
+            # Comprehensive search - generate more lookback values that scale to max_lookback
+            base_lookbacks = [90, 120, 180, 240, 480]
+            
+            # Add more values scaling up to max_lookback
+            if self.max_lookback > 480:
+                current = 800
+                while current < self.max_lookback:
+                    base_lookbacks.append(current)
+                    current = int(current * 1.4)  # Slightly denser than balanced
+                
+                # Always include max_lookback itself
+                if base_lookbacks[-1] != self.max_lookback:
+                    base_lookbacks.append(self.max_lookback)
+            
             return {
-                'lookback': [90, 120, 180, 240],
+                'lookback': sorted(set(base_lookbacks)),
                 'num_stacks': [2, 3],
                 'num_blocks': [2, 3, 4],
                 'theta_size': [4, 8, 16],
@@ -151,39 +188,35 @@ class NBEATSTuner:
             Dictionary with metrics (MAPE, MBE, train_time, etc.)
         """
         try:
-            # Check if we have enough data
-            min_required = self.train_window + self.horizon
+            lookback = config.get('lookback', config.get('window', 60))
+            train_window = lookback + self.horizon
+            min_required = train_window
             if len(self.df) < min_required:
                 return {
                     'error': f'Insufficient data: need {min_required}, have {len(self.df)}',
                     'mape': float('inf')
                 }
-            
-            # Check if lookback is too large for training window
-            if config['lookback'] >= self.train_window:
+            if lookback >= train_window:
                 return {
-                    'error': f'Lookback {config["lookback"]} >= train_window {self.train_window}',
+                    'error': f'Lookback {lookback} >= train_window {train_window}',
                     'mape': float('inf')
                 }
-            
-            # Create model
+            config_for_model = dict(config)
+            config_for_model['lookback'] = lookback
             model = create_model(
                 'nbeats',
                 horizon=self.horizon,
                 random_state=42,
-                **config
+                **config_for_model
             )
-            
-            # Get training data
-            train_data = self.df['value'].iloc[:self.train_window]
-            
-            # Train
+            train_data = self.df['value'].iloc[:train_window]
             if verbose:
                 print(f"  Training with {len(train_data)} points...", end=' ')
             train_time = model.train(train_data)
             if verbose:
                 print(f"{train_time:.2f}s")
-            
+            if verbose:
+                pass
             # Make prediction
             if verbose:
                 print(f"  Predicting...", end=' ')
@@ -194,47 +227,31 @@ class NBEATSTuner:
             # Collect actual values
             actuals = []
             for i in range(self.horizon):
-                actual_idx = self.train_window + i
+                actual_idx = train_window + i  # Use local train_window, not self.train_window
                 if actual_idx >= len(self.df):
                     return {
                         'error': f'Insufficient data: need index {actual_idx}, have {len(self.df)}',
                         'mape': float('inf')
                     }
-                actuals.append(self.df['value'].iloc[actual_idx])
+                actuals.append(float(self.df['value'].iloc[actual_idx]))
             
-            # Calculate metrics
+            # Calculate metrics using shared evaluation logic
             if len(actuals) != self.horizon:
                 return {
                     'error': 'Could not collect all actuals',
                     'mape': float('inf')
                 }
             
-            # Calculate sMAPE (symmetric MAPE) - same as forecaster
-            errors = []
-            for actual, pred in zip(actuals, predictions):
-                err_abs = abs(actual - pred)
-                denominator = (abs(actual) + abs(pred)) / 2.0
-                
-                if denominator < 1e-6:
-                    mape_val = 0.0
-                else:
-                    mape_val = (err_abs / denominator) * 100.0
-                    mape_val = min(mape_val, 1000.0)  # Cap at 1000%
-                
-                errors.append(mape_val)
-            
-            mape = np.mean(errors) if errors else float('inf')
-            
-            # MBE
-            mbe = np.mean([actual - pred for actual, pred in zip(actuals, predictions)])
-            
-            # RMSE
-            rmse = np.sqrt(np.mean([(actual - pred)**2 for actual, pred in zip(actuals, predictions)]))
+            eval_metrics = evaluate_predictions(
+                predictions=predictions,
+                actuals=actuals,
+                verbose=False  # tune_nbeats doesn't print evaluation details
+            )
             
             return {
-                'mape': mape,
-                'mbe': mbe,
-                'rmse': rmse,
+                'mape': eval_metrics['mape'],
+                'mbe': eval_metrics['mbe'],
+                'rmse': eval_metrics['rmse'],
                 'train_time': train_time,
                 'config': config,
                 'predictions': predictions[:5],
@@ -248,13 +265,17 @@ class NBEATSTuner:
                 'config': config,
             }
     
-    def run_tuning(self, search_space, max_time_per_config=300):
+    def run_tuning(self, search_space, max_time_per_config=300, use_adaptive=True):
         """
-        Run hyperparameter tuning.
+        Run hyperparameter tuning with optional two-phase adaptive search.
+        
+        Phase 1 (Exploration): Test all configurations to find promising regions
+        Phase 2 (Exploitation): Refine the best configurations with nearby parameter values
         
         Args:
             search_space: Dictionary of parameter ranges
             max_time_per_config: Skip configs that would take longer than this
+            use_adaptive: Enable two-phase adaptive search (default: True)
             
         Returns:
             List of results, sorted by MAPE
@@ -267,11 +288,20 @@ class NBEATSTuner:
         total_configs = len(all_configs)
         print(f"\n{'='*70}")
         print(f"N-BEATS Hyperparameter Tuning")
-        print(f"Total configurations to test: {total_configs}")
+        if use_adaptive:
+            print(f"Mode: ADAPTIVE (Exploration → Exploitation)")
+        else:
+            print(f"Mode: EXHAUSTIVE")
+        print(f"Phase 1 configurations: {total_configs}")
         print(f"{'='*70}\n")
         
         results = []
         best_mape_so_far = float('inf')
+        
+        # PHASE 1: EXPLORATION
+        print(f"{'='*70}")
+        print("PHASE 1: EXPLORATION - Sweeping entire parameter space")
+        print(f"{'='*70}\n")
         
         for i, config in enumerate(all_configs, 1):
             print(f"\n[{i}/{total_configs}] Testing configuration:")
@@ -293,10 +323,115 @@ class NBEATSTuner:
                     print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
                     best_mape_so_far = result['mape']
         
+        # PHASE 2: EXPLOITATION
+        if use_adaptive and len(results) > 0:
+            results.sort(key=lambda x: x['mape'])
+            
+            top_n = min(3, len([r for r in results if 'error' not in r]))
+            if top_n > 0:
+                print(f"\n{'='*70}")
+                print(f"PHASE 2: EXPLOITATION - Refining top {top_n} configurations")
+                print(f"{'='*70}\n")
+                
+                refinement_configs = []
+                for idx in range(top_n):
+                    best_config = results[idx]['config']
+                    print(f"\nRefining config #{idx+1} (MAPE: {results[idx]['mape']:.2f}%):")
+                    for key, val in best_config.items():
+                        print(f"  {key}: {val}")
+                    
+                    refinements = self._generate_refinements(best_config, search_space)
+                    refinement_configs.extend(refinements)
+                
+                tested_configs = {self._config_to_key(r['config']) for r in results}
+                new_refinements = [c for c in refinement_configs 
+                                 if self._config_to_key(c) not in tested_configs]
+                
+                print(f"\nTesting {len(new_refinements)} refinement configurations...")
+                
+                for i, config in enumerate(new_refinements, 1):
+                    print(f"\n[Refinement {i}/{len(new_refinements)}]:")
+                    for key, val in config.items():
+                        print(f"  {key}: {val}")
+                    
+                    result = self.evaluate_config(config, verbose=True)
+                    results.append(result)
+                    
+                    if 'error' in result:
+                        print(f"  ❌ ERROR: {result['error']}")
+                    else:
+                        print(f"  ✓ MAPE: {result['mape']:.2f}% | "
+                              f"RMSE: {result['rmse']:.2f} | "
+                              f"Train: {result['train_time']:.1f}s")
+                        
+                        if result['mape'] < best_mape_so_far:
+                            print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
+                            best_mape_so_far = result['mape']
+        
         # Sort by MAPE
         results.sort(key=lambda x: x['mape'])
         
         return results
+    
+    def _config_to_key(self, config):
+        """Convert config dict to hashable key for deduplication."""
+        return tuple(sorted(config.items()))
+    
+    def _generate_refinements(self, base_config, search_space):
+        """Generate refinement configurations around a good base config."""
+        refinements = []
+        
+        for param, base_value in base_config.items():
+            if param not in search_space:
+                continue
+                
+            possible_values = search_space[param]
+            
+            if len(possible_values) <= 1:
+                continue
+            
+            try:
+                base_idx = possible_values.index(base_value)
+            except ValueError:
+                continue
+            
+            new_values = []
+            
+            # Try value between base and next larger (if exists)
+            if base_idx < len(possible_values) - 1:
+                next_val = possible_values[base_idx + 1]
+                if isinstance(base_value, (int, float)) and isinstance(next_val, (int, float)):
+                    if param == 'lookback':
+                        mid = (base_value + next_val) // 2
+                        if mid != base_value and mid != next_val:
+                            new_values.append(mid)
+                    elif param == 'learning_rate':
+                        import math
+                        log_mid = math.exp((math.log(base_value) + math.log(next_val)) / 2)
+                        if log_mid != base_value and log_mid != next_val:
+                            new_values.append(log_mid)
+            
+            # Try value between base and previous smaller (if exists)
+            if base_idx > 0:
+                prev_val = possible_values[base_idx - 1]
+                if isinstance(base_value, (int, float)) and isinstance(prev_val, (int, float)):
+                    if param == 'lookback':
+                        mid = (base_value + prev_val) // 2
+                        if mid != base_value and mid != prev_val and mid not in new_values:
+                            new_values.append(mid)
+                    elif param == 'learning_rate':
+                        import math
+                        log_mid = math.exp((math.log(base_value) + math.log(prev_val)) / 2)
+                        if log_mid != base_value and log_mid != prev_val and log_mid not in new_values:
+                            new_values.append(log_mid)
+            
+            # Create new configs with refined values
+            for new_val in new_values:
+                new_config = base_config.copy()
+                new_config[param] = new_val
+                refinements.append(new_config)
+        
+        return refinements
     
     def save_results(self, results, output_file):
         """Save tuning results to file."""
@@ -381,9 +516,18 @@ Examples:
     args = parser.parse_args()
     
     # Load config if specified
+    original_mape = None
     if args.config:
         with open(args.config, 'r') as f:
             config = yaml.safe_load(f)
+        
+        # Store original MAPE if it exists (for comparison later)
+        if '# MAPE' in config:
+            mape_str = str(config['# MAPE']).replace('%', '').strip()
+            try:
+                original_mape = float(mape_str)
+            except ValueError:
+                pass
         
         # If csv-file is not specified in config, infer it from config filename
         if 'csv-file' not in config and 'csv_file' not in config:
@@ -428,7 +572,8 @@ Examples:
         csv_file=args.csv_file,
         horizon=args.horizon,
         train_window=args.train_window,
-        inference_window=args.window
+        inference_window=args.window,
+        max_lookback=args.max_lookback
     )
     
     # Define search space
@@ -448,83 +593,72 @@ Examples:
     # Save results
     tuner.save_results(results, args.output)
     
-    # Save best config as ready-to-use YAML (overwrite the original config file)
+    # Save best config as ready-to-use YAML (only if we beat the original)
     if results and 'error' not in results[0]:
         best = results[0]
+        best_mape = best['mape']
         
-        # Use the original config file
-        best_config_file = args.output
-        best_config = {
-            '# N-BEATS Best Configuration': None,
-            '# Generated': datetime.now().isoformat(),
-            '# MAPE': f"{best['mape']:.2f}%",
-            '# RMSE': f"{best['rmse']:.2f}",
-            '# Train Time': f"{best['train_time']:.1f}s",
-            'model': 'nbeats',
-            'single-shot': True,
-            'train-window': args.train_window,
-            'window': args.window,
-            'horizon': args.horizon,
-        }
+        # Check if we should save (only if we beat original or no original exists)
+        should_save = True
+        if original_mape is not None:
+            if best_mape >= original_mape:
+                should_save = False
+                print(f"\n{'='*70}")
+                print(f"⚠️  Tuning did NOT improve over original config")
+                print(f"   Original MAPE: {original_mape:.2f}%")
+                print(f"   Best new MAPE: {best_mape:.2f}%")
+                print(f"   Config file will NOT be overwritten")
+                print(f"{'='*70}\n")
+            else:
+                print(f"\n{'='*70}")
+                print(f"✅ Tuning IMPROVED over original config!")
+                print(f"   Original MAPE: {original_mape:.2f}%")
+                print(f"   Best new MAPE: {best_mape:.2f}%")
+                print(f"   Improvement: {original_mape - best_mape:.2f}% reduction")
+                print(f"   Config file will be updated")
+                print(f"{'='*70}\n")
         
-        # Add best hyperparameters
-        for key, val in best['config'].items():
-            # Convert underscores to hyphens for YAML consistency
-            yaml_key = key.replace('_', '-')
-            best_config[yaml_key] = val
-        
-        # Add server config
-        best_config['server-port'] = 5000
-        
-        with open(best_config_file, 'w') as f:
-            # Write comments manually since yaml.dump doesn't preserve them well
-            f.write(f"# N-BEATS Best Configuration\n")
-            f.write(f"# Generated: {datetime.now().isoformat()}\n")
-            f.write(f"# MAPE: {best['mape']:.2f}%\n")
-            f.write(f"# RMSE: {best['rmse']:.2f}\n")
-            f.write(f"# Train Time: {best['train_time']:.1f}s\n\n")
+        if should_save:
+            # Calculate actual train_window based on best lookback
+            best_lookback = best['config']['lookback']
+            best_train_window = best_lookback + args.horizon
             
-            # Write the actual config
-            config_to_write = {k: v for k, v in best_config.items() if not k.startswith('#')}
-            yaml.dump(config_to_write, f, default_flow_style=False, sort_keys=False)
-        
-        print(f"\n✓ Best config saved to: {best_config_file}")
-        
-        # Save to cache system
-        class TempArgs:
-            def __init__(self):
-                self.model = 'nbeats'
-                self.csv_file = args.csv_file
-                self.ip = None
-                self.context = None
-                self.dimension = None
-                self.window = args.train_window
-                self.train_window = args.train_window
-                self.horizon = args.horizon
-                self.lookback = best['config']['lookback']
-                self.hidden_size = best['config'].get('hidden_size', 256)
-                self.num_layers = best['config'].get('num_layers', 4)
-                self.dropout = best['config'].get('dropout', 0.1)
-                self.learning_rate = best['config']['learning_rate']
-                self.epochs = best['config']['epochs']
-                self.batch_size = best['config']['batch_size']
-                self.prediction_smoothing = 0
-                self.aggregation_method = 'weighted'
-                self.aggregation_weight_tau = 300.0
-        
-        temp_args = TempArgs()
-        fingerprint = ConfigFingerprint.from_args(temp_args)
-        config_hash = fingerprint.hash()
-        
-        cache_results = {
-            "tuning_mode": True,
-            "best_mape": float(best['mape']),
-            "best_rmse": float(best['rmse']),
-            "train_time": float(best['train_time']),
-            "config": best['config'],
-        }
-        save_cache(config_hash, fingerprint, cache_results)
-        print(f"✓ Results cached (hash: {config_hash[:16]}...)")
+            # Use the original config file
+            best_config_file = args.output
+            best_config = {
+                '# N-BEATS Best Configuration': None,
+                '# Generated': datetime.now().isoformat(),
+                '# MAPE': f"{best['mape']:.2f}%",
+                '# RMSE': f"{best['rmse']:.2f}",
+                '# Train Time': f"{best['train_time']:.1f}s",
+                'model': 'nbeats',
+                'single-shot': True,
+                'train-window': best_train_window,
+                'horizon': args.horizon,
+            }
+            
+            # Add best hyperparameters
+            for key, val in best['config'].items():
+                # Convert underscores to hyphens for YAML consistency
+                yaml_key = key.replace('_', '-')
+                best_config[yaml_key] = val
+            
+            # Add server config
+            best_config['server-port'] = 5000
+            
+            with open(best_config_file, 'w') as f:
+                # Write comments manually since yaml.dump doesn't preserve them well
+                f.write(f"# N-BEATS Best Configuration\n")
+                f.write(f"# Generated: {datetime.now().isoformat()}\n")
+                f.write(f"# MAPE: {best['mape']:.2f}%\n")
+                f.write(f"# RMSE: {best['rmse']:.2f}\n")
+                f.write(f"# Train Time: {best['train_time']:.1f}s\n\n")
+                
+                # Write the actual config
+                config_to_write = {k: v for k, v in best_config.items() if not k.startswith('#')}
+                yaml.dump(config_to_write, f, default_flow_style=False, sort_keys=False)
+            
+            print(f"\n✓ Best config saved to: {best_config_file}")
         
         # Print best config
         print(f"\n{'='*70}")

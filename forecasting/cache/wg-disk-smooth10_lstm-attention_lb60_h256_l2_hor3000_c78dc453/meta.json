@@ -1,0 +1,26 @@
+{
+  "hash": "c78dc453bb5f097db2d3d178fca6e633d44690f8ce6c2ec43b66cfb241daea80",
+  "readable_name": "wg-disk-smooth10_lstm-attention_lb60_h256_l2_hor3000",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "wg-disk-smooth10.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 100,
+    "hidden_size": 256,
+    "horizon": 3000,
+    "ip": "localhost",
+    "learning_rate": 0.0005,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "none",
+    "train_window": 4200,
+    "window": 1200
+  }
+}

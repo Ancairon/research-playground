@@ -9,6 +9,7 @@ Config files supported via --config flag.
 from universal_forecaster import UniversalForecaster
 from models import create_model, list_available_models, get_model_info
 from config_cache import ConfigFingerprint, load_cached_results, save_cache
+from shared_prediction import evaluate_predictions
 import requests
 import subprocess
 import pandas as pd
@@ -193,6 +194,12 @@ def main():
                         help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Training batch size')
+    parser.add_argument('--scaler-type', type=str, default='standard', choices=['standard', 'none'],
+                        help='LSTM/GRU/LSTM-Attn: Scaler type. standard=StandardScaler (better for drift), none=no scaling (raw values)')
+    parser.add_argument('--bias-correction', type=bool, default=True,
+                        help='LSTM/GRU/LSTM-Attn: Enable automatic bias correction to fix systematic over/under-prediction')
+    parser.add_argument('--use-differencing', type=bool, default=False,
+                        help='LSTM/GRU/LSTM-Attn: Learn changes instead of absolute values to eliminate level-shift drift')
     
     # N-BEATS specific parameters
     parser.add_argument('--num-stacks', type=int, default=2,
@@ -320,6 +327,7 @@ def main():
         key_mapping = {
             'server-port': 'live_server_port',
             'live-server': 'no_live_server',  # Note: inverted logic
+            'lookback': 'window',  # Translate lookback to window for backwards compatibility
         }
         
         for key, value in config.items():
@@ -359,15 +367,18 @@ def main():
 
     # Add model-specific parameters
     if args.model in ['lstm', 'gru', 'lstm-attention', 'lstm-attn']:
-        model_kwargs['lookback'] = args.lookback
+        model_kwargs['lookback'] = args.window
         model_kwargs['hidden_size'] = args.hidden_size
         model_kwargs['num_layers'] = args.num_layers
         model_kwargs['dropout'] = args.dropout
         model_kwargs['learning_rate'] = args.learning_rate
         model_kwargs['epochs'] = args.epochs
         model_kwargs['batch_size'] = args.batch_size
+        model_kwargs['scaler_type'] = args.scaler_type
+        model_kwargs['bias_correction'] = args.bias_correction
+        model_kwargs['use_differencing'] = args.use_differencing
     elif args.model == 'nbeats':
-        model_kwargs['lookback'] = args.lookback
+        model_kwargs['lookback'] = args.window
         model_kwargs['num_stacks'] = args.num_stacks
         model_kwargs['num_blocks'] = args.num_blocks
         model_kwargs['theta_size'] = args.theta_size
@@ -376,7 +387,7 @@ def main():
         model_kwargs['epochs'] = args.epochs
         model_kwargs['batch_size'] = args.batch_size
     elif args.model == 'tft':
-        model_kwargs['lookback'] = args.lookback
+        model_kwargs['lookback'] = args.window
         model_kwargs['hidden_size'] = args.hidden_size
         model_kwargs['num_heads'] = args.num_heads
         model_kwargs['num_layers'] = args.num_layers
@@ -545,6 +556,10 @@ def main():
         # Get initial training data
         if csv_source:
             init_df = csv_source.get_history(train_window)['value']
+            if not args.quiet:
+                print(f"[Single-Shot] Training with {len(init_df)} points (rows [0, {train_window}))")
+                print(f"[Single-Shot] First train value: {init_df.iloc[0]:.3f}, Last train value: {init_df.iloc[-1]:.3f}")
+                print(f"[Single-Shot] Will evaluate on rows [{csv_source.current_index}, {csv_source.current_index + args.horizon})")
         else:
             init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
 
@@ -659,12 +674,14 @@ def main():
                     print(f"[Single-Shot] ERROR: Ran out of data at step {step+1}/{args.horizon}")
                     sys.exit(1)
                 
-                step_df = csv_source.get_history(1)
-                actual_values.append(float(step_df['value'].iloc[-1]))
-                actual_timestamps.append(step_df.index[-1])
+                # Directly access the actual value at current_index (not get_history which is exclusive)
+                actual_values.append(float(csv_source.df['value'].iloc[csv_source.current_index - 1]))
+                actual_timestamps.append(csv_source.df.index[csv_source.current_index - 1])
             
             if not args.quiet:
                 print(f"[Single-Shot] Collected {len(actual_values)} actual values")
+                print(f"[Single-Shot] First actual: {actual_values[0]:.3f}, Last actual: {actual_values[-1]:.3f}")
+                print(f"[Single-Shot] First pred: {predictions[0]:.3f}, Last pred: {predictions[-1]:.3f}")
         else:
             # Live mode - wait for real time to pass
             if not args.quiet:
@@ -677,19 +694,25 @@ def main():
                 actual_timestamps.append(step_df.index[-1])
         
         # Generate prediction timestamps
-        # Infer the actual time interval from the data
-        if csv_source is not None and len(prediction_df) >= 2:
-            # Calculate interval from last two points
-            data_interval = int((prediction_df.index[-1] - prediction_df.index[-2]).total_seconds())
+        # In CSV mode, use the actual timestamps from the data for perfect alignment
+        # In live mode, generate timestamps based on prediction interval
+        if csv_source is not None:
+            # Use actual timestamps from CSV for perfect alignment with ground truth
+            # Map CSV timestamps to current simulation time
+            pred_timestamps = [csv_source._csv_to_current_time(ts) for ts in actual_timestamps]
         else:
-            # Use prediction_interval parameter
-            data_interval = int(args.prediction_interval)
-        
-        pred_timestamps = pd.date_range(
-            start=prediction_timestamp + pd.Timedelta(seconds=data_interval),
-            periods=args.horizon,
-            freq=f'{data_interval}s'
-        )
+            # Live mode: generate timestamps based on prediction interval
+            # Infer the actual time interval from the data
+            if len(prediction_df) >= 2:
+                data_interval = int((prediction_df.index[-1] - prediction_df.index[-2]).total_seconds())
+            else:
+                data_interval = int(args.prediction_interval)
+            
+            pred_timestamps = pd.date_range(
+                start=prediction_timestamp + pd.Timedelta(seconds=data_interval),
+                periods=args.horizon,
+                freq=f'{data_interval}s'
+            )
         
         if not args.quiet:
             print(f"[Single-Shot] Sample prediction timestamps: {pred_timestamps[:3].tolist()}")
@@ -712,25 +735,18 @@ def main():
                 'actual': float(actual_values[i]) if i < len(actual_values) else None
             })
         
-        # Calculate errors for each step
-        errors = []
-        for i, (pred, actual) in enumerate(zip(predictions, actual_values)):
-            err_abs = abs(actual - pred)
-            denominator = (abs(actual) + abs(pred)) / 2.0
-            
-            if denominator < 1e-6:
-                mape = 0.0
-            else:
-                mape = (err_abs / denominator) * 100.0
-                mape = min(mape, 1000.0)  # Cap at 1000%
-            
-            errors.append(mape)
-            
-            if not args.quiet:
-                print(f"[Single-Shot] Step {i+1}/{args.horizon}: Pred={pred:.3f}, Actual={actual:.3f}, MAPE={mape:.2f}%")
+        # Calculate errors using shared evaluation logic
+        eval_metrics = evaluate_predictions(
+            predictions=predictions,
+            actuals=actual_values,
+            verbose=not args.quiet
+        )
+        errors = eval_metrics['errors']
+        mean_error = eval_metrics['mape']
         
-        # Calculate mean error across horizon
-        mean_error = float(np.mean(errors))
+        if not args.quiet:
+            for i, (pred, actual, error) in enumerate(zip(predictions, actual_values, errors)):
+                print(f"[Single-Shot] Step {i+1}/{args.horizon}: Pred={pred:.3f}, Actual={actual:.3f}, MAPE={error:.2f}%")
         
         # Send to visualization server if running
         if server_started:

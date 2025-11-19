@@ -33,6 +33,9 @@ class ConfigFingerprint:
     prediction_smoothing: int
     aggregation_method: str
     aggregation_weight_tau: float
+    scaler_type: Optional[str] = 'standard'
+    bias_correction: Optional[bool] = True
+    use_differencing: Optional[bool] = False
 
     @classmethod
     def from_args(cls, args) -> "ConfigFingerprint":
@@ -62,6 +65,9 @@ class ConfigFingerprint:
             prediction_smoothing=args.prediction_smoothing,
             aggregation_method=args.aggregation_method,
             aggregation_weight_tau=args.aggregation_weight_tau,
+            scaler_type=getattr(args, "scaler_type", "standard"),
+            bias_correction=getattr(args, "bias_correction", True),
+            use_differencing=getattr(args, "use_differencing", False),
         )
 
     def to_dict(self) -> Dict[str, Any]:
