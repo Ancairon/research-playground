@@ -9,7 +9,7 @@ Config files supported via --config flag.
 from universal_forecaster import UniversalForecaster
 from models import create_model, list_available_models, get_model_info
 from config_cache import ConfigFingerprint, load_cached_results, save_cache
-from shared_prediction import evaluate_predictions
+from shared_prediction import evaluate_predictions, single_shot_evaluation
 import requests
 import subprocess
 import pandas as pd
@@ -492,7 +492,8 @@ def main():
                         '--port', str(args.live_server_port),
                         '--ip', args.ip if not csv_source else 'csv-mode',
                         '--context', args.context if not csv_source else args.csv_file,
-                        '--dimension', args.dimension if not csv_source else f"model={args.model}"
+                        '--dimension', args.dimension if not csv_source else f"model={args.model}",
+                        '--horizon', str(args.horizon)
                     ]
                     try:
                         subprocess.Popen(
@@ -553,24 +554,6 @@ def main():
                 sys.exit(0)
 
         # Cache miss or ignored: proceed with normal training flow
-        # Get initial training data
-        if csv_source:
-            init_df = csv_source.get_history(train_window)['value']
-            if not args.quiet:
-                print(f"[Single-Shot] Training with {len(init_df)} points (rows [0, {train_window}))")
-                print(f"[Single-Shot] First train value: {init_df.iloc[0]:.3f}, Last train value: {init_df.iloc[-1]:.3f}")
-                print(f"[Single-Shot] Will evaluate on rows [{csv_source.current_index}, {csv_source.current_index + args.horizon})")
-        else:
-            init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
-
-        # Initial training with timing
-        train_start = time.time()
-        forecaster.train_initial(init_df)
-        train_time = time.time() - train_start
-
-        if not args.quiet:
-            print("\n[Single-Shot] Mode enabled - making one prediction and evaluating")
-            print(f"[Single-Shot] Training completed in {train_time:.2f}s")
         
         # Start live server for visualization (unless explicitly disabled)
         server_started = False
@@ -579,9 +562,10 @@ def main():
             server_cmd = [
                 'python3', 'prediction_server.py',
                 '--port', str(args.live_server_port),
-                '--ip', args.ip,
-                '--context', args.context,
-                '--dimension', args.dimension
+                '--ip', args.ip if not csv_source else 'csv-mode',
+                '--context', args.context if not csv_source else args.csv_file,
+                '--dimension', args.dimension if not csv_source else f"model={args.model}",
+                '--horizon', str(args.horizon)
             ]
             try:
                 subprocess.Popen(
@@ -599,49 +583,51 @@ def main():
                 if not args.quiet:
                     print(f"[Server] Could not start: {e}\n")
         
-        # Verify we have enough data to evaluate (CSV mode only)
+        # Use shared evaluation logic for consistent predictions
         if csv_source:
-            # Check if we have at least horizon steps remaining after current position
-            remaining_rows = csv_source.total_rows - csv_source.current_index
-            if remaining_rows < args.horizon:
-                print(f"[Single-Shot] ERROR: Not enough data to evaluate prediction!")
-                print(f"[Single-Shot] Need {args.horizon} future steps, but only {remaining_rows} remain")
-                print(f"[Single-Shot] Current position: {csv_source.current_index}/{csv_source.total_rows}")
-                sys.exit(1)
+            # CSV mode: Use END-aligned evaluation
+            # Pass the pandas Series with its datetime index, not the numpy values
+            full_data = csv_source.df['value']
             
-            if not args.quiet:
-                print(f"[Single-Shot] Verified {remaining_rows} rows available for evaluation")
-        
-        # Get current data for prediction
-        if csv_source:
-            prediction_df = csv_source.get_history(args.window)
-            prediction_timestamp = csv_source.get_current_timestamp()
-            prediction_position = csv_source.current_index
-        else:
-            prediction_df = get_data_from_api(args.ip, args.context, args.dimension, args.window)
-            prediction_timestamp = prediction_df.index[-1]
-            prediction_position = None
-        
-        # Make ONE prediction with timing
-        inference_start = time.time()
-        predictions = forecaster.forecast_step(prediction_df['value'])
-        inference_time = time.time() - inference_start
-        
-        if not args.quiet:
-            print(f"[Single-Shot] Prediction made at {prediction_timestamp}")
-            print(f"[Single-Shot] Inference completed in {inference_time:.4f}s")
-            print(f"[Single-Shot] Horizon: {args.horizon} steps")
-            print(f"[Single-Shot] Predictions: {[f'{p:.3f}' for p in predictions]}")
-        
-        # Prepare historical data for visualization
-        # In single-shot CSV mode, send ALL data before the prediction point
-        # In live mode, send only the prediction window
-        if csv_source:
-            # Send all data from start (0) up to the prediction point
-            # Get data directly from the dataframe without using get_history
-            hist_df = csv_source.df.iloc[0:prediction_position].copy()
+            result = single_shot_evaluation(
+                forecaster=forecaster,
+                data=full_data,
+                train_window=train_window,
+                lookback=args.window,
+                horizon=args.horizon,
+                verbose=not args.quiet
+            )
             
-            # Remap timestamps to current simulation time
+            # Check for errors from evaluation
+            if 'error' in result:
+                print(f"\n❌ Evaluation failed: {result['error']}")
+                print(f"   MAPE: {result['mape']}")
+                return
+            
+            predictions = result['predictions']
+            actual_values = result['actuals']
+            errors = result['errors']
+            mean_error = result['mape']
+            train_time = result['train_time']
+            inference_time = result.get('inference_time', 0.0)
+            
+            # Get timestamps for predictions from the CSV
+            # Prediction indices are at the END: [len(data) - horizon : len(data)]
+            prediction_indices = list(range(len(full_data) - args.horizon, len(full_data)))
+            actual_timestamps = [csv_source.df.index[i] for i in prediction_indices]
+            pred_timestamps = [csv_source._csv_to_current_time(ts) for ts in actual_timestamps]
+            
+            # Get the timestamp just before predictions start (last training point)
+            prediction_position = len(full_data) - args.horizon
+            prediction_timestamp = csv_source._csv_to_current_time(csv_source.df.index[prediction_position - 1])
+            
+            # Historical data: only the training window (not entire CSV)
+            # Training window ends at prediction_position and starts train_window points before
+            train_start_idx = prediction_position - train_window
+            if train_start_idx < 0:
+                train_start_idx = 0
+            
+            hist_df = csv_source.df.iloc[train_start_idx:prediction_position].copy()
             hist_df.index = [csv_source._csv_to_current_time(ts) for ts in hist_df.index]
             
             historical_data = [
@@ -653,8 +639,36 @@ def main():
             ]
             
             if not args.quiet:
-                print(f"[Single-Shot] Sending {len(historical_data)} historical data points to visualization")
+                print(f"[Single-Shot] Sending {len(historical_data)} historical data points (training window) to visualization")
         else:
+            # Live API mode: Sequential training and prediction
+            init_df = get_data_from_api(args.ip, args.context, args.dimension, train_window)['value']
+            
+            # Initial training with timing
+            train_start = time.time()
+            forecaster.train_initial(init_df)
+            train_time = time.time() - train_start
+            
+            if not args.quiet:
+                print("\n[Single-Shot] Mode enabled - making one prediction and evaluating")
+                print(f"[Single-Shot] Training completed in {train_time:.2f}s")
+            
+            # Get current data for prediction
+            prediction_df = get_data_from_api(args.ip, args.context, args.dimension, args.window)
+            prediction_timestamp = prediction_df.index[-1]
+            
+            # Make ONE prediction with timing
+            inference_start = time.time()
+            predictions = forecaster.forecast_step(prediction_df['value'])
+            inference_time = time.time() - inference_start
+            
+            if not args.quiet:
+                print(f"[Single-Shot] Prediction made at {prediction_timestamp}")
+                print(f"[Single-Shot] Inference completed in {inference_time:.4f}s")
+                print(f"[Single-Shot] Horizon: {args.horizon} steps")
+                print(f"[Single-Shot] Predictions: {[f'{p:.3f}' for p in predictions]}")
+            
+            # Historical data for visualization
             historical_data = [
                 {
                     'timestamp': ts.isoformat(),
@@ -662,28 +676,10 @@ def main():
                 }
                 for ts, val in zip(prediction_df.index, prediction_df['value'].values)
             ]
-        
-        # Now advance through the data to collect actuals for evaluation
-        actual_values = []
-        actual_timestamps = []
-        if csv_source:
-            # Fast-forward through CSV to collect actuals
-            for step in range(args.horizon):
-                csv_source.current_index += 1
-                if csv_source.is_finished():
-                    print(f"[Single-Shot] ERROR: Ran out of data at step {step+1}/{args.horizon}")
-                    sys.exit(1)
-                
-                # Directly access the actual value at current_index (not get_history which is exclusive)
-                actual_values.append(float(csv_source.df['value'].iloc[csv_source.current_index - 1]))
-                actual_timestamps.append(csv_source.df.index[csv_source.current_index - 1])
             
-            if not args.quiet:
-                print(f"[Single-Shot] Collected {len(actual_values)} actual values")
-                print(f"[Single-Shot] First actual: {actual_values[0]:.3f}, Last actual: {actual_values[-1]:.3f}")
-                print(f"[Single-Shot] First pred: {predictions[0]:.3f}, Last pred: {predictions[-1]:.3f}")
-        else:
-            # Live mode - wait for real time to pass
+            # Wait for actual data to arrive
+            actual_values = []
+            actual_timestamps = []
             if not args.quiet:
                 print(f"[Single-Shot] Waiting {args.horizon * args.prediction_interval} seconds for actual data...")
             
@@ -692,17 +688,8 @@ def main():
                 step_df = get_data_from_api(args.ip, args.context, args.dimension, 1)
                 actual_values.append(float(step_df['value'].iloc[-1]))
                 actual_timestamps.append(step_df.index[-1])
-        
-        # Generate prediction timestamps
-        # In CSV mode, use the actual timestamps from the data for perfect alignment
-        # In live mode, generate timestamps based on prediction interval
-        if csv_source is not None:
-            # Use actual timestamps from CSV for perfect alignment with ground truth
-            # Map CSV timestamps to current simulation time
-            pred_timestamps = [csv_source._csv_to_current_time(ts) for ts in actual_timestamps]
-        else:
-            # Live mode: generate timestamps based on prediction interval
-            # Infer the actual time interval from the data
+            
+            # Generate prediction timestamps
             if len(prediction_df) >= 2:
                 data_interval = int((prediction_df.index[-1] - prediction_df.index[-2]).total_seconds())
             else:
@@ -713,9 +700,18 @@ def main():
                 periods=args.horizon,
                 freq=f'{data_interval}s'
             )
+            
+            # Calculate errors
+            eval_metrics = evaluate_predictions(
+                predictions=predictions,
+                actuals=actual_values,
+                verbose=not args.quiet
+            )
+            errors = eval_metrics['errors']
+            mean_error = eval_metrics['mape']
         
         if not args.quiet:
-            print(f"[Single-Shot] Sample prediction timestamps: {pred_timestamps[:3].tolist()}")
+            print(f"[Single-Shot] Sample prediction timestamps: {pred_timestamps[:3] if hasattr(pred_timestamps, '__getitem__') else list(pred_timestamps)[:3]}")
         
         # Build prediction payload for visualization
         pred_payload = []
@@ -735,15 +731,6 @@ def main():
                 'actual': float(actual_values[i]) if i < len(actual_values) else None
             })
         
-        # Calculate errors using shared evaluation logic
-        eval_metrics = evaluate_predictions(
-            predictions=predictions,
-            actuals=actual_values,
-            verbose=not args.quiet
-        )
-        errors = eval_metrics['errors']
-        mean_error = eval_metrics['mape']
-        
         if not args.quiet:
             for i, (pred, actual, error) in enumerate(zip(predictions, actual_values, errors)):
                 print(f"[Single-Shot] Step {i+1}/{args.horizon}: Pred={pred:.3f}, Actual={actual:.3f}, MAPE={error:.2f}%")
@@ -757,7 +744,7 @@ def main():
                         'timestamp': ts.isoformat(),
                         'value': float(val)
                     }
-                    for ts, val in zip(actual_timestamps, actual_values)
+                    for ts, val in zip(pred_timestamps, actual_values)  # Use pred_timestamps for alignment
                 ]
                 
                 # In CSV mode, override context/dimension to show run-specific info
@@ -768,6 +755,12 @@ def main():
                     ctx = args.context
                     dim = args.dimension
 
+                # Get the last historical value for the visualization
+                if csv_source is not None:
+                    last_actual = float(historical_data[-1]['value']) if historical_data else 0.0
+                else:
+                    last_actual = float(prediction_df['value'].iloc[-1])
+                
                 requests.post(
                     f'http://localhost:{args.live_server_port}/predictions',
                     json={
@@ -777,7 +770,7 @@ def main():
                         'prediction_interval': args.prediction_interval,
                         'timestamp': prediction_timestamp.isoformat(),
                         'backoff': False,
-                        'actual': float(prediction_df['value'].iloc[-1]),
+                        'actual': last_actual,
                         'csv_mode': csv_source is not None,
                         'historical_data': historical_data,
                         'future_actuals': future_actuals,
@@ -848,7 +841,8 @@ def main():
             '--port', str(args.live_server_port),
             '--ip', args.ip,
             '--context', args.context,
-            '--dimension', args.dimension
+            '--dimension', args.dimension,
+            '--horizon', str(args.horizon)
         ]
         try:
             subprocess.Popen(

@@ -28,16 +28,18 @@ from shared_prediction import single_shot_evaluation
 class LSTMAttentionTuner:
     """Hyperparameter tuner for LSTM with Attention models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None):
         """
         Initialize tuner.
         
         Args:
             csv_file: Path to CSV file
             horizon: Prediction horizon
-            train_window: Training window size
+            train_window: Training window size (default, not used if extra_train is set)
             inference_window: Inference window size (for backwards compatibility)
             max_lookback: Maximum lookback to search (default: data_size // 3)
+            max_training: Maximum train window to search (enables train window tuning)
+            extra_train: Extra training data beyond lookback+horizon (enforces relationship)
         """
         self.df = pd.read_csv(csv_file, parse_dates=['timestamp'], index_col='timestamp')
         self.horizon = horizon
@@ -45,6 +47,7 @@ class LSTMAttentionTuner:
         self.inference_window = inference_window
         self.csv_file = csv_file
         self.original_config = {}  # Will be populated with original config values
+        self.extra_train = extra_train  # Store extra_train for train_window calculation
         
         # Set max_lookback
         data_size = len(self.df)
@@ -53,8 +56,16 @@ class LSTMAttentionTuner:
         else:
             self.max_lookback = data_size // 3
         
+        # Set max_training (for train_window tuning)
+        if max_training is not None:
+            self.max_training = min(max_training, data_size - horizon)
+        else:
+            self.max_training = None  # Will not tune train_window
+        
         print(f"Loaded {data_size} data points from {csv_file}")
         print(f"Max lookback constrained to: {self.max_lookback} (available data: {data_size})")
+        if self.max_training:
+            print(f"Train window will be tuned up to: {self.max_training}")
         print(f"Will predict {self.horizon} steps ahead")
         
     def define_search_space(self, search_type='quick'):
@@ -115,38 +126,46 @@ class LSTMAttentionTuner:
             
             # Scale model complexity with data
             if data_size < 2000:
-                hidden_sizes = [64]
+                hidden_sizes = [32]
             elif data_size < 5000:
-                hidden_sizes = [64, 128]
+                hidden_sizes = [32, 64]
             else:
-                hidden_sizes = [64, 128, 256]
+                hidden_sizes = [32,64]
             
             num_layers = [2] if data_size < 5000 or self.horizon < 1000 else [2, 3]
             dropout_values = [config_dropout]  # Use config value
             epochs = [config_epochs]  # Use config value
+            batch_sizes = [128, 256]  # Search common batch sizes
             
-            return {
+            search_space = {
                 'lookback': lookback_values,
                 'hidden_size': hidden_sizes,
                 'num_layers': num_layers,
                 'dropout': dropout_values,
                 'learning_rate': [0.001, 0.0005],  # Search both common values
                 'epochs': epochs,
-                'batch_size': [config_batch_size],  # Use config value
+                'batch_size': batch_sizes,  # Search batch sizes
+                'use-differencing': [False, True],  # Try both differencing modes
             }
+            
+            return search_space
         
         elif search_type == 'quick':
             # Ultra-fast: test 2-3 lookback values
             base_lookbacks = [60, 120]
-            return {
+            
+            search_space = {
                 'lookback': filter_lookbacks(base_lookbacks),
                 'hidden_size': [64, 128],
                 'num_layers': [2],
                 'dropout': [config_dropout],
                 'learning_rate': [0.001],  # Quick mode: just one learning rate
                 'epochs': [config_epochs],
-                'batch_size': [config_batch_size],
+                'batch_size': [128],  # Quick: just one batch size
+                'use-differencing': [False, True],
             }
+            
+            return search_space
         
         elif search_type == 'balanced':
             # Balanced: generate lookback values that scale to max_lookback
@@ -165,15 +184,18 @@ class LSTMAttentionTuner:
                 if base_lookbacks[-1] != self.max_lookback:
                     base_lookbacks.append(self.max_lookback)
             
-            return {
+            search_space = {
                 'lookback': filter_lookbacks(sorted(set(base_lookbacks))),
                 'hidden_size': [64, 128],
                 'num_layers': [2],
                 'dropout': [config_dropout],
                 'learning_rate': [0.001, 0.0005],  # Balanced: test 2 learning rates
                 'epochs': [config_epochs],
-                'batch_size': [config_batch_size],
+                'batch_size': [64, 128],  # Balanced: test 2 batch sizes
+                'use-differencing': [False, True],
             }
+            
+            return search_space
         
         else:  # exhaustive
             # Comprehensive search: generate more lookback values that scale to max_lookback
@@ -191,15 +213,18 @@ class LSTMAttentionTuner:
                 if base_lookbacks[-1] != self.max_lookback:
                     base_lookbacks.append(self.max_lookback)
             
-            return {
+            search_space = {
                 'lookback': filter_lookbacks(sorted(set(base_lookbacks))),
                 'hidden_size': [32, 64, 128, 256],
                 'num_layers': [2, 3, 4],
                 'dropout': [0.1, 0.2, 0.3],  # Exhaustive tries multiple dropout values
                 'learning_rate': [0.001, 0.0005, 0.0001],  # Exhaustive: test 3 learning rates
                 'epochs': [config_epochs],  # Use config epochs with early stopping
-                'batch_size': [32, 64],  # Exhaustive tries multiple batch sizes
+                'batch_size': [32, 64, 128, 256],  # Exhaustive: search all common batch sizes
+                'use-differencing': [False, True],
             }
+            
+            return search_space
     
     def evaluate_config(self, config, verbose=False):
         """
@@ -215,7 +240,22 @@ class LSTMAttentionTuner:
         try:
             # Get lookback from config (support 'window' as alias for backwards compatibility)
             lookback = config.get('lookback', config.get('window', 60))
-            train_window = lookback + self.horizon
+            
+            # Calculate train_window from formula: train_window = lookback + horizon + extra_train
+            if self.extra_train is not None:
+                train_window = lookback + self.horizon + self.extra_train
+                if verbose:
+                    print(f"  Calculated train_window: {train_window} = {lookback} (lookback) + {self.horizon} (horizon) + {self.extra_train} (extra_train)")
+            else:
+                # Fallback to config value if extra_train not set (backwards compatibility)
+                train_window = config.get('train_window', config.get('train-window', lookback + self.horizon))
+            
+            # Validate train_window is sufficient
+            min_train_window = lookback + self.horizon
+            if train_window < min_train_window:
+                if verbose:
+                    print(f"  WARNING: train_window {train_window} < minimum {min_train_window}, using minimum")
+                train_window = min_train_window
             
             # Prepare config for model - use forecast_main's parameter names
             model_kwargs = {
@@ -236,7 +276,7 @@ class LSTMAttentionTuner:
             
             # Add all config parameters (from tuning search space)
             for key, value in config.items():
-                if key not in ['lookback', 'window']:  # Skip lookback, we already set it
+                if key not in ['lookback', 'window', 'train_window', 'train-window']:  # Skip these - they're for tuner, not model
                     # Convert hyphenated keys to underscores
                     if isinstance(key, str) and '-' in key:
                         key = key.replace('-', '_')
@@ -517,11 +557,15 @@ class LSTMAttentionTuner:
         for i, result in enumerate(results[:top_n], 1):
             if 'error' in result:
                 continue
+            
+            is_original = result['config'].get('_original', False)
+            marker = " [ORIGINAL CONFIG]" if is_original else ""
                 
-            print(f"#{i} - MAPE: {result['mape']:.2f}%")
+            print(f"#{i} - MAPE: {result['mape']:.2f}%{marker}")
             print(f"   Config:")
             for key, val in result['config'].items():
-                print(f"     {key}: {val}")
+                if key != '_original':  # Don't print the marker in config
+                    print(f"     {key}: {val}")
             print(f"   Metrics:")
             print(f"     RMSE: {result['rmse']:.2f}")
             print(f"     MBE: {result['mbe']:.2f}")
@@ -535,31 +579,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Quick tuning (few combinations, fast)
-  python tune_lstm_attention.py --csv data.csv --mode quick
+  # Quick tuning with fractional parameters (20% horizon, 30% extra training)
+  python tune_lstm_attention.py --csv data.csv --horizon 0.2 --extra-train 0.3 --mode quick
   
-  # Auto tuning (intelligent parameter selection)
-  python tune_lstm_attention.py --csv data.csv --mode auto
+  # Auto tuning with absolute values (predict 1000 points, 2000 extra training)
+  python tune_lstm_attention.py --csv data.csv --horizon 1000 --extra-train 2000 --mode auto
   
-  # Balanced tuning (moderate search)
-  python tune_lstm_attention.py --csv data.csv --mode balanced
+  # Load from config file and override horizon
+  python tune_lstm_attention.py --config config.yaml --horizon 0.15 --mode balanced
   
-  # Load from config file
-  python tune_lstm_attention.py --config config_lstm_attention_test.yaml --mode auto
+Note:
+  - Values 0-1 are treated as fractions of dataset size
+  - Values >1 are treated as absolute point counts
+  - train_window = lookback + horizon + extra_train (tuner searches for optimal lookback)
         """
     )
     
     parser.add_argument('--csv', '--csv-file', dest='csv_file', 
                         help='Path to CSV file with time series data')
     parser.add_argument('--config', help='Path to YAML config file (alternative to --csv)')
-    parser.add_argument('--horizon', type=int, default=3000,
-                        help='Forecast horizon (default: 3000)')
-    parser.add_argument('--train-window', type=int, default=10000,
-                        help='Training window size (default: 10000)')
-    parser.add_argument('--window', type=int, default=None,
-                        help='Inference window size (default: same as train-window)')
-    parser.add_argument('--max-lookback', type=int, default=None,
-                        help='Maximum lookback to search (default: data_size/3, caps search space)')
+    parser.add_argument('--horizon', type=float, default=0.2,
+                        help='Forecast horizon - absolute value or fraction (0-1) of dataset size (default: 0.2 = 20%% of data)')
+    parser.add_argument('--extra-train', type=float, default=0.3,
+                        help='Extra training data beyond lookback+horizon - absolute value or fraction (0-1) of dataset size (default: 0.3 = 30%% of data). Total train_window = lookback + horizon + extra_train')
     parser.add_argument('--mode', choices=['quick', 'balanced', 'exhaustive', 'auto'],
                         default='auto',
                         help='Tuning mode (default: auto)')
@@ -630,9 +672,47 @@ Examples:
         
         print(f"Loaded configuration from: {args.config}")
     
-    # Set default window if not specified
-    if args.window is None:
-        args.window = args.train_window
+    # Load CSV to get data size for fraction calculations
+    df = pd.read_csv(args.csv_file, parse_dates=['timestamp'], index_col='timestamp')
+    data_size = len(df)
+    
+    # Helper function to convert fraction to absolute value
+    def to_absolute(value, data_size, param_name):
+        """Convert fraction (0-1) to absolute value, or keep absolute if >1."""
+        if value is None:
+            return None
+        if 0 < value <= 1:
+            absolute = int(value * data_size)
+            print(f"[Param] {param_name}: {value} (fraction) → {absolute} (absolute, data_size={data_size})")
+            return absolute
+        else:
+            return int(value)
+    
+    # Convert fractions to absolute values
+    args.horizon = to_absolute(args.horizon, data_size, 'horizon')
+    args.extra_train = to_absolute(args.extra_train, data_size, 'extra_train')
+    
+    # Calculate max_lookback 
+    # We cap it at data_size/3 for sanity (to leave room for horizon and avoid overfitting)
+    args.max_lookback = data_size // 3
+    print(f"[Param] max_lookback: {args.max_lookback} (data_size/3={data_size//3})")
+    
+    # Calculate train_window range for tuning
+    # Minimum: lookback + horizon + extra_train (where lookback is small)
+    # Maximum: max_lookback + horizon + extra_train (where lookback is at its max)
+    args.max_training = args.max_lookback + args.horizon + args.extra_train
+    print(f"[Param] max_training: {args.max_training} (max_lookback + horizon + extra_train)")
+    
+    # For the initial tuner setup, use a reasonable default train_window
+    args.train_window = args.horizon + args.extra_train + (args.max_lookback // 2)
+    args.window = args.max_lookback  # Inference window = max lookback
+    
+    print(f"\n[Tuning Strategy]")
+    print(f"  Horizon: {args.horizon} points (what to predict)")
+    print(f"  Extra training: {args.extra_train} points (beyond lookback+horizon)")
+    print(f"  Max lookback: {args.max_lookback} points (tuner will search 0-{args.max_lookback})")
+    print(f"  Train window range: {args.horizon} to {args.max_training} points")
+    print(f"  Formula: train_window = lookback + horizon + extra_train\n")
     
     # Set default output if still not specified
     if args.output is None:
@@ -648,11 +728,41 @@ Examples:
         horizon=args.horizon,
         train_window=args.train_window,
         inference_window=args.window,
-        max_lookback=args.max_lookback
+        max_lookback=args.max_lookback,
+        max_training=args.max_training,
+        extra_train=args.extra_train
     )
     
     # Store original config for later use
     tuner.original_config = original_config
+    
+    # Evaluate original config first as baseline (if it exists and has the right parameters)
+    original_result = None
+    if original_config and 'lookback' in original_config:
+        print("\n" + "="*70)
+        print("EVALUATING ORIGINAL CONFIG (Baseline)")
+        print("="*70)
+        
+        # Extract config parameters for evaluation
+        original_eval_config = {}
+        for key in ['lookback', 'hidden-size', 'num-layers', 'dropout', 'learning-rate', 'epochs', 'batch-size']:
+            if key in original_config:
+                original_eval_config[key.replace('-', '_')] = original_config[key]
+        
+        if original_eval_config:
+            print(f"Original config parameters: {original_eval_config}")
+            original_result = tuner.evaluate_config(original_eval_config, verbose=True)
+            
+            if 'error' not in original_result:
+                print(f"\n✓ Original config baseline:")
+                print(f"  MAPE: {original_result['mape']:.2f}%")
+                print(f"  RMSE: {original_result['rmse']:.2f}")
+                print(f"  Train Time: {original_result['train_time']:.1f}s")
+                # Update original_mape with actual measured value
+                original_mape = original_result['mape']
+            else:
+                print(f"\n✗ Original config evaluation failed: {original_result.get('error')}")
+        print("="*70 + "\n")
     
     # Define search space
     search_space = tuner.define_search_space(args.mode)
@@ -665,6 +775,14 @@ Examples:
     # Run tuning
     results = tuner.run_tuning(search_space)
     
+    # Add original config result to results list for comparison (if it exists)
+    if original_result is not None and 'error' not in original_result:
+        # Mark it as the original config
+        original_result['config']['_original'] = True
+        results.append(original_result)
+        # Re-sort results by MAPE
+        results.sort(key=lambda x: x.get('mape', float('inf')))
+    
     # Print summary
     tuner.print_summary(results, top_n=5)
     
@@ -675,10 +793,21 @@ Examples:
     if results and 'error' not in results[0]:
         best = results[0]
         best_mape = best['mape']
+        is_best_original = best['config'].get('_original', False)
         
-        # Check if we should save (only if we beat original or no original exists)
+        # Check if we should save (don't save if original is best, or if we didn't improve)
         should_save = True
-        if original_mape is not None:
+        
+        if is_best_original:
+            # Original config is the best - don't overwrite
+            should_save = False
+            print(f"\n{'='*70}")
+            print(f"✓ Original config is ALREADY OPTIMAL!")
+            print(f"   Original MAPE: {best_mape:.2f}%")
+            print(f"   No tuned config beat the original")
+            print(f"   Config file will NOT be overwritten")
+            print(f"{'='*70}\n")
+        elif original_mape is not None:
             if best_mape >= original_mape:
                 should_save = False
                 print(f"\n{'='*70}")
@@ -697,9 +826,12 @@ Examples:
                 print(f"{'='*70}\n")
         
         if should_save:
-            # Calculate the actual train_window based on best config
+            # Calculate the actual train_window based on best config using the formula
             best_lookback = best['config']['lookback']
-            best_train_window = best_lookback + args.horizon
+            if args.extra_train is not None:
+                best_train_window = best_lookback + args.horizon + args.extra_train
+            else:
+                best_train_window = best_lookback + args.horizon
             
             # Safety check: If output file is the same as input config, only overwrite if we improved
             best_config_file = args.output
@@ -727,6 +859,9 @@ Examples:
             
             # Add best hyperparameters
             for key, val in best['config'].items():
+                # Skip internal markers
+                if key == '_original':
+                    continue
                 # Convert underscores to hyphens for YAML consistency
                 yaml_key = key.replace('_', '-')
                 best_config[yaml_key] = val

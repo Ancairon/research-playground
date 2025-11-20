@@ -202,13 +202,12 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         
         # Scale data based on scaler type
         if self.scaler is None:
-            # No scaler - normalize using mean/std for training stability
-            self.data_mean = np.mean(data_values)
-            self.data_std = np.std(data_values)
-            if self.data_std < 1e-8:
-                self.data_std = 1.0  # Prevent division by zero
-            data_scaled = (data_values - self.data_mean) / self.data_std
+            # No scaler - use raw data without normalization
+            data_scaled = data_values
             self.last_data_raw = data.values[-self.lookback:]
+            # Store mean/std as None to indicate no scaling
+            self.data_mean = None
+            self.data_std = None
         else:
             # Use StandardScaler
             data_scaled = self.scaler.fit_transform(data_values.reshape(-1, 1)).flatten()
@@ -219,14 +218,18 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         if len(dataset) == 0:
             raise ValueError("No training samples created")
         
-        # Use multiple workers for data loading - conservative to avoid memory issues
-        num_workers = 2 if len(dataset) > 2000 else 0
+        # Use single worker for stability with large lookback/horizon
+        # Multiple workers can cause memory corruption with large tensors
+        # Note: We use num_workers=0 which fixed the corruption issue, so no need to reduce batch_size
+        num_workers = 0  # Always use main process for data loading
+        
         dataloader = DataLoader(
             dataset, 
-            batch_size=self.batch_size, 
+            batch_size=self.batch_size,  # Use full batch_size - no reduction needed
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=False  # Disable on CPU to save memory
+            pin_memory=False,  # Disable on CPU to save memory
+            persistent_workers=False  # Disable persistent workers
         )
         
         # Create model
@@ -362,8 +365,8 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         
         # Inverse transform based on scaler type
         if self.scaler is None:
-            # No scaler - denormalize using stored mean/std
-            predictions = predictions_scaled * self.data_std + self.data_mean
+            # No scaler - use predictions as-is (no denormalization needed)
+            predictions = predictions_scaled
         else:
             # StandardScaler - use inverse_transform
             predictions = self.scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
@@ -399,8 +402,8 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
                 data_values = data.values
             
             if self.scaler is None:
-                # No scaler - normalize using stored mean/std
-                data_scaled = (data_values - self.data_mean) / self.data_std
+                # No scaler - use raw data
+                data_scaled = data_values
                 self.last_data_raw = np.concatenate([self.last_data_raw, data.values])[-self.lookback:]
             else:
                 # StandardScaler

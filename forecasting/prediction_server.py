@@ -189,6 +189,7 @@ if __name__ == '__main__':
     parser.add_argument('--ip', default='localhost', help='Netdata IP for demo config')
     parser.add_argument('--context', default='system.cpu', help='Context for demo config')
     parser.add_argument('--dimension', default='user', help='Dimension for demo config')
+    parser.add_argument('--horizon', type=int, default=10, help='Prediction horizon for demo config')
     parser.add_argument('--ymin', type=float, help='Y-axis min for demo')
     parser.add_argument('--ymax', type=float, help='Y-axis max for demo')
     
@@ -198,6 +199,7 @@ if __name__ == '__main__':
         'ip': args.ip,
         'context': args.context,
         'dimension': args.dimension,
+        'horizon': args.horizon,
         'ymin': args.ymin,
         'ymax': args.ymax
     }
