@@ -208,6 +208,7 @@ class TFTModel(BaseTimeSeriesModel):
     def train(self, data: pd.Series, **kwargs) -> float:
         """Train TFT."""
         start_time = time.time()
+        max_train_loss = kwargs.get('max_train_loss', None)
         
         # Validate data size
         if len(data) < self.lookback + self.horizon:
@@ -270,7 +271,17 @@ class TFTModel(BaseTimeSeriesModel):
                     batch_count += 1
                 
                 avg_loss = epoch_loss / batch_count
-                
+
+                # Early abort if caller signalled a maximum acceptable loss
+                if max_train_loss is not None:
+                    try:
+                        if float(max_train_loss) is not None and avg_loss > float(max_train_loss):
+                            print(f"  Aborting training: avg_loss={avg_loss:.6f} > max_train_loss={max_train_loss}")
+                            best_loss = min(best_loss, avg_loss)
+                            break
+                    except Exception:
+                        pass
+
                 # Early stopping check
                 if avg_loss < best_loss - 1e-6:
                     best_loss = avg_loss
@@ -283,6 +294,11 @@ class TFTModel(BaseTimeSeriesModel):
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]
         training_time = time.time() - start_time
+        # Expose best loss for external monitoring
+        try:
+            self.last_train_loss = float(best_loss)
+        except Exception:
+            self.last_train_loss = float('nan')
         return training_time
     
     def predict(self, **kwargs) -> List[float]:

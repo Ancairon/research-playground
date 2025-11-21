@@ -181,6 +181,7 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
     def train(self, data: pd.Series, **kwargs) -> float:
         """Train LSTM with Attention."""
         start_time = time.time()
+        max_train_loss = kwargs.get('max_train_loss', None)
         
         # Validate data size
         if len(data) < self.lookback + self.horizon:
@@ -289,6 +290,16 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
                     current_lr = optimizer.param_groups[0]['lr']
                     print(f"  Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.6f}, LR: {current_lr:.6f}")
                 
+                # Allow early-abort if caller signalled a max_train_loss
+                if max_train_loss is not None:
+                    try:
+                        if float(max_train_loss) is not None and avg_loss > float(max_train_loss):
+                            print(f"  Aborting training: avg_loss={avg_loss:.6f} > max_train_loss={max_train_loss}")
+                            best_loss = min(best_loss, avg_loss)
+                            break
+                    except Exception:
+                        pass
+
                 # Early stopping check
                 if avg_loss < best_loss - 1e-6:  # Improvement threshold
                     best_loss = avg_loss
@@ -307,6 +318,11 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
             self._calculate_bias_correction(data_scaled)
         
         training_time = time.time() - start_time
+        # Expose best loss for external monitoring/guards
+        try:
+            self.last_train_loss = float(best_loss)
+        except Exception:
+            self.last_train_loss = float('nan')
         return training_time
     
     def _calculate_bias_correction(self, data_scaled: np.ndarray):

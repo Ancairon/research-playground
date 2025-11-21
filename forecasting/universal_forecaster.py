@@ -24,6 +24,7 @@ from collections import deque
 from typing import Optional, List, Dict
 
 from models.base_model import BaseTimeSeriesModel
+from train_utils import train_model
 
 
 def compute_threshold_from_errors(
@@ -104,6 +105,7 @@ class UniversalForecaster:
         backoff_error_min: float = 70.0,
         print_min_validations: int = 3,
         quiet: bool = False,
+        max_train_loss: float = None,
         history_fetcher=None
     ):
         """
@@ -147,6 +149,8 @@ class UniversalForecaster:
         self.backoff_error_min = backoff_error_min
         self.print_min_validations = print_min_validations
         self.quiet = quiet
+        # Threshold passed down to train_model to allow early-abort during model.train
+        self.max_train_loss = max_train_loss
         # Callable to fetch historical training data: history_fetcher(seconds_back) -> pd.Series
         self.history_fetcher = history_fetcher
         # Aggregation method for multiple predictions per target timestamp.
@@ -222,17 +226,23 @@ class UniversalForecaster:
         Returns:
             Training time in seconds
         """
-        train_time = self.model.train(data)
+        # Use centralized training helper for consistent behavior across callers
+        res = train_model(self.model, data, quiet=True, max_train_loss=self.max_train_loss)
+        train_time = res.get('train_time', 0.0)
         self.training_times.append(train_time)
-        
-        # Calculate baseline statistics from training data
-        self.baseline_mean = float(data.mean())
-        self.baseline_std = float(data.std())
-        
+
+        # Calculate baseline statistics from training data (from helper)
+        try:
+            self.baseline_mean = float(res.get('baseline_mean', float(data.mean())))
+            self.baseline_std = float(res.get('baseline_std', float(data.std())))
+        except Exception:
+            self.baseline_mean = float(data.mean())
+            self.baseline_std = float(data.std())
+
         if not self.quiet:
             print(f"[{self.model.get_model_name()}] Init train t={train_time:.3f}s")
             print(f"[Baseline] Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}")
-        
+
         return train_time
 
     def _get_training_series(self, live_data: pd.Series) -> pd.Series:
@@ -678,28 +688,29 @@ class UniversalForecaster:
             return
         if time.time() < self.backoff_retrain_scheduled_time:
             return
-
         try:
             retrain_series = self._get_training_series(live_data)
-            retrain_time = self.model.train(retrain_series)
+            res = train_model(self.model, retrain_series, quiet=True, max_train_loss=self.max_train_loss)
+            retrain_time = res.get('train_time', 0.0)
             self.training_times.append(retrain_time)
             self.last_retrain_step = self.step
 
-            # Update baseline statistics with new training data
+            # Update baseline statistics with new training data (from helper)
             try:
-                self.baseline_mean = float(retrain_series.mean())
-                self.baseline_std = float(retrain_series.std())
+                self.baseline_mean = float(res.get('baseline_mean', float(retrain_series.mean())))
+                self.baseline_std = float(res.get('baseline_std', float(retrain_series.std())))
             except Exception:
                 # Fallback to live_data if computing stats on retrain_series fails
                 self.baseline_mean = float(live_data.mean())
                 self.baseline_std = float(live_data.std())
-            
+
             # If we are in an active backoff, count this retrain for evaluation
             if getattr(self, '_backoff_active', False):
                 try:
                     self._retrain_count_since_backoff_start += 1
                 except Exception as e:
                     self._append_backoff_log(self.model.get_model_name(), "retrain_count_increment_failed", f"err={e}")
+
             # Reset escalation and announce
             self.backoff_retrain_scheduled_time = None
             self.consec_count = 0
@@ -1045,35 +1056,36 @@ class UniversalForecaster:
                         # Execute immediate retrain
                         try:
                             retrain_series = self._get_training_series(live_data)
-                            retrain_time = self.model.train(retrain_series)
+                            res = train_model(self.model, retrain_series, quiet=True, max_train_loss=self.max_train_loss)
+                            retrain_time = res.get('train_time', 0.0)
                             self.training_times.append(retrain_time)
                             self.last_retrain_step = self.step
                             prev_retrain_time = self.last_retrain_time
                             self.last_retrain_time = time.time()
                             self.consec_count = 0  # Reset consecutive error counter
-                            
+
                             # Update baseline statistics
                             try:
-                                self.baseline_mean = float(retrain_series.mean())
-                                self.baseline_std = float(retrain_series.std())
+                                self.baseline_mean = float(res.get('baseline_mean', float(retrain_series.mean())))
+                                self.baseline_std = float(res.get('baseline_std', float(retrain_series.std())))
                             except Exception:
                                 self.baseline_mean = float(live_data.mean())
                                 self.baseline_std = float(live_data.std())
-                            
+
                             if not self.quiet:
                                 print(f"[{self.model.get_model_name()}] Retrain s={self.step} t={retrain_time:.3f}s (error spike)")
                                 print(f"[Baseline] Updated - Mean: {self.baseline_mean:.2f}, Std: {self.baseline_std:.2f}\n")
-                            
+
                             self._append_backoff_log(
                                 self.model.get_model_name(), 
                                 "error_spike_retrain",
                                 f"err={mean_horizon_error:.1f}, thr={error_retrain_threshold:.1f}, time={retrain_time:.3f}s"
                             )
-                            
+
                             # Clear error history after retrain
                             self.errors.clear()
                             self.recent_errors.clear()
-                            
+
                             # Check if this was a rapid retrain (could trigger backoff)
                             now = time.time()
                             rapid_retrain_detected = (now - prev_retrain_time) < float(self.retrain_rapid_seconds)
@@ -1222,14 +1234,15 @@ class UniversalForecaster:
                     if self._consecutive_error_suppressed >= self.retrain_consec:
                         try:
                             retrain_series = self._get_training_series(live_data)
-                            retrain_time = self.model.train(retrain_series)
+                            res = train_model(self.model, retrain_series, quiet=True, max_train_loss=self.max_train_loss)
+                            retrain_time = res.get('train_time', 0.0)
                             self.training_times.append(retrain_time)
                             self.last_retrain_step = self.step
                             prev_retrain_time = self.last_retrain_time
                             self.last_retrain_time = time.time()
                             try:
-                                self.baseline_mean = float(retrain_series.mean())
-                                self.baseline_std = float(retrain_series.std())
+                                self.baseline_mean = float(res.get('baseline_mean', float(retrain_series.mean())))
+                                self.baseline_std = float(res.get('baseline_std', float(retrain_series.std())))
                             except Exception:
                                 self.baseline_mean = float(live_data.mean())
                                 self.baseline_std = float(live_data.std())
@@ -1269,7 +1282,8 @@ class UniversalForecaster:
             
             try:
                 retrain_series = self._get_training_series(live_data)
-                retrain_time = self.model.train(retrain_series)
+                res = train_model(self.model, retrain_series, quiet=True, max_train_loss=self.max_train_loss)
+                retrain_time = res.get('train_time', 0.0)
                 self.training_times.append(retrain_time)
                 self.last_retrain_step = self.step
                 prev_retrain_time = self.last_retrain_time
@@ -1278,8 +1292,8 @@ class UniversalForecaster:
 
                 # Update baseline statistics with new training data
                 try:
-                    self.baseline_mean = float(retrain_series.mean())
-                    self.baseline_std = float(retrain_series.std())
+                    self.baseline_mean = float(res.get('baseline_mean', float(retrain_series.mean())))
+                    self.baseline_std = float(res.get('baseline_std', float(retrain_series.std())))
                 except Exception:
                     self.baseline_mean = float(live_data.mean())
                     self.baseline_std = float(live_data.std())

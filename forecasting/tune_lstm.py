@@ -21,12 +21,13 @@ import argparse
 from models import create_model
 from universal_forecaster import UniversalForecaster
 from shared_prediction import single_shot_evaluation
+from train_utils import train_model
 
 
 class LSTMTuner:
     """Hyperparameter tuner for LSTM models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_train_loss=None):
         """
         Initialize tuner.
         
@@ -43,6 +44,8 @@ class LSTMTuner:
         # For tuning, we use train_window as both training and inference window
         # This simplifies the logic and matches single-shot behavior
         self.inference_window = train_window
+        # Optional training abort threshold used to skip clearly bad configs early
+        self.max_train_loss = max_train_loss
         
         # Load data
         self.df = pd.read_csv(csv_file)
@@ -204,7 +207,9 @@ class LSTMTuner:
             train_data = self.df['value'].iloc[:train_window]
             if verbose:
                 print(f"  Training with {len(train_data)} points...", end=' ')
-            train_time = model.train(train_data)
+            # Use centralized training helper for consistent behavior
+            res = train_model(model, train_data, quiet=True, max_train_loss=self.max_train_loss)
+            train_time = res.get('train_time', 0.0)
             if verbose:
                 print(f"{train_time:.2f}s")
             if verbose:
@@ -292,7 +297,22 @@ class LSTMTuner:
         print("PHASE 1: EXPLORATION - Sweeping entire parameter space")
         print(f"{'='*70}\n")
         
+        bad_configs = []  # configs that performed extremely poorly
+
+        def _is_similar(a, b, min_matches=None):
+            """Return True if configs a and b share at least min_matches identical param values."""
+            keys = set(a.keys()) & set(b.keys())
+            if min_matches is None:
+                min_matches = max(1, len(keys) // 2)
+            matches = sum(1 for k in keys if a.get(k) == b.get(k))
+            return matches >= min_matches
+
         for i, config in enumerate(all_configs, 1):
+            # Skip configs that are similar to previously identified bad regions
+            skip_due_to_bad = any(_is_similar(config, bc) for bc in bad_configs)
+            if skip_due_to_bad:
+                print(f"\n[{i}/{len(all_configs)}] Skipping configuration similar to poor-performing region")
+                continue
             print(f"\n[{i}/{len(all_configs)}] Testing configuration:")
             for key, value in sorted(config.items()):
                 print(f"  {key}: {value}")
@@ -314,7 +334,19 @@ class LSTMTuner:
                     best_mape_so_far = result['mape']
             else:
                 print(f"  ✗ Error: {result['error']}")
-            
+                # Mark this config as bad so we avoid exploring similar parameter combos
+                bad_configs.append(config)
+                results.append(result)
+                continue
+
+            # If MAPE is absurdly high (or infinite), treat as poor region
+            try:
+                mape_val = float(result.get('mape', float('inf')))
+            except Exception:
+                mape_val = float('inf')
+            if mape_val >= 500.0 or not np.isfinite(mape_val):
+                bad_configs.append(config)
+
             results.append(result)
         
         # PHASE 2: EXPLOITATION
@@ -556,6 +588,8 @@ def main():
                         help='Search strategy (default: auto - intelligently adapts to your data)')
     parser.add_argument('--max-time', type=int, default=300,
                         help='Max seconds per config (default: 300)')
+    parser.add_argument('--max-train-loss', type=float, default=None,
+                        help='Optional max_train_loss to abort training early for poor configs')
     parser.add_argument('--output', type=str, default=None,
                         help='Output file for results (default: same as config file or tuning_results.json)')
     
@@ -627,7 +661,8 @@ def main():
         horizon=horizon,
         train_window=train_window,
         inference_window=inference_window,
-        max_lookback=args.max_lookback
+        max_lookback=args.max_lookback,
+        max_train_loss=args.max_train_loss
     )
     
     # Define search space

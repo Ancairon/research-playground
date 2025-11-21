@@ -20,12 +20,13 @@ import argparse
 
 from models import create_model
 from shared_prediction import evaluate_predictions
+from train_utils import train_model
 
 
 class NBEATSTuner:
     """Hyperparameter tuner for N-BEATS models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_train_loss=None):
         """
         Initialize tuner.
         
@@ -40,6 +41,8 @@ class NBEATSTuner:
         self.horizon = horizon
         self.train_window = train_window
         self.inference_window = inference_window
+        # Optional training abort threshold used to skip clearly bad configs early
+        self.max_train_loss = max_train_loss
         
         # Load data (handle relative paths)
         if not os.path.isabs(csv_file):
@@ -212,7 +215,9 @@ class NBEATSTuner:
             train_data = self.df['value'].iloc[:train_window]
             if verbose:
                 print(f"  Training with {len(train_data)} points...", end=' ')
-            train_time = model.train(train_data)
+            # Use centralized training helper
+            res = train_model(model, train_data, quiet=True, max_train_loss=self.max_train_loss)
+            train_time = res.get('train_time', 0.0)
             if verbose:
                 print(f"{train_time:.2f}s")
             if verbose:
@@ -303,25 +308,50 @@ class NBEATSTuner:
         print("PHASE 1: EXPLORATION - Sweeping entire parameter space")
         print(f"{'='*70}\n")
         
+        bad_configs = []
+
+        def _is_similar(a, b, min_matches=None):
+            keys = set(a.keys()) & set(b.keys())
+            if min_matches is None:
+                min_matches = max(1, len(keys) // 2)
+            matches = sum(1 for k in keys if a.get(k) == b.get(k))
+            return matches >= min_matches
+
         for i, config in enumerate(all_configs, 1):
+            if any(_is_similar(config, bc) for bc in bad_configs):
+                print(f"\n[{i}/{total_configs}] Skipping configuration similar to poor-performing region")
+                continue
+
             print(f"\n[{i}/{total_configs}] Testing configuration:")
             for key, val in config.items():
                 print(f"  {key}: {val}")
-            
+
             result = self.evaluate_config(config, verbose=True)
-            results.append(result)
-            
+
             if 'error' in result:
                 print(f"  ❌ ERROR: {result['error']}")
-            else:
-                print(f"  ✓ MAPE: {result['mape']:.2f}% | "
-                      f"RMSE: {result['rmse']:.2f} | "
-                      f"Train: {result['train_time']:.1f}s")
-                
-                # Track best result for progress indication
-                if result['mape'] < best_mape_so_far:
-                    print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
-                    best_mape_so_far = result['mape']
+                bad_configs.append(config)
+                results.append(result)
+                continue
+
+            print(f"  ✓ MAPE: {result['mape']:.2f}% | "
+                  f"RMSE: {result['rmse']:.2f} | "
+                  f"Train: {result['train_time']:.1f}s")
+
+            # Track best result for progress indication
+            if result['mape'] < best_mape_so_far:
+                print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
+                best_mape_so_far = result['mape']
+
+            # Mark extremely poor configurations as bad
+            try:
+                mape_val = float(result.get('mape', float('inf')))
+            except Exception:
+                mape_val = float('inf')
+            if mape_val >= 500.0 or not np.isfinite(mape_val):
+                bad_configs.append(config)
+
+            results.append(result)
         
         # PHASE 2: EXPLOITATION
         if use_adaptive and len(results) > 0:
@@ -510,6 +540,8 @@ Examples:
     parser.add_argument('--mode', choices=['quick', 'balanced', 'exhaustive', 'auto'],
                         default='auto',
                         help='Tuning mode (default: auto)')
+    parser.add_argument('--max-train-loss', type=float, default=None,
+                        help='Optional max_train_loss to abort training early for poor configs')
     parser.add_argument('--output', default=None,
                         help='Output file for results (default: same as config file or nbeats_tuning_results.yaml)')
     
@@ -573,7 +605,8 @@ Examples:
         horizon=args.horizon,
         train_window=args.train_window,
         inference_window=args.window,
-        max_lookback=args.max_lookback
+        max_lookback=args.max_lookback,
+        max_train_loss=args.max_train_loss
     )
     
     # Define search space

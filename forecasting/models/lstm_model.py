@@ -122,6 +122,7 @@ class LSTMModel(BaseTimeSeriesModel):
     def train(self, data: pd.Series, **kwargs) -> float:
         """Train LSTM model."""
         start_time = time.time()
+        max_train_loss = kwargs.get('max_train_loss', None)
         
         # Validate data size
         if len(data) < self.lookback + self.horizon:
@@ -183,7 +184,23 @@ class LSTMModel(BaseTimeSeriesModel):
                     batch_count += 1
                 
                 avg_loss = epoch_loss / batch_count
-                
+
+                # If caller supplied a max_train_loss, abort early when the
+                # running epoch loss is already above that threshold. This
+                # lets the centralized train wrapper (or tuner) avoid wasting
+                # time in clearly-poor regions.
+                if max_train_loss is not None:
+                    try:
+                        if float(max_train_loss) is not None and avg_loss > float(max_train_loss):
+                            print(f"  Aborting training: avg_loss={avg_loss:.6f} > max_train_loss={max_train_loss}")
+                            # Ensure best_loss reflects the observed value so the
+                            # central wrapper can decide to mark the run as failed.
+                            best_loss = min(best_loss, avg_loss)
+                            break
+                    except Exception:
+                        # If conversion fails, ignore and continue training
+                        pass
+
                 # Early stopping check
                 if avg_loss < best_loss - 1e-6:
                     best_loss = avg_loss
@@ -196,6 +213,11 @@ class LSTMModel(BaseTimeSeriesModel):
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]
         training_time = time.time() - start_time
+        # Store the best loss observed during training for external checks
+        try:
+            self.last_train_loss = float(best_loss)
+        except Exception:
+            self.last_train_loss = float('nan')
         return training_time
     
     def predict(self, **kwargs) -> List[float]:

@@ -260,6 +260,10 @@ def main():
     parser.add_argument('--retrain-error-min', type=float, default=70.0,
                         help='Minimum error threshold for spike retrain (MAPE %%)')
 
+    # Training safety
+    parser.add_argument('--max-train-loss', type=float, default=1000.0,
+                        help='Maximum acceptable training loss (avg per-epoch MSE). Exceeding this will abort training')
+
     # Output
     parser.add_argument('--quiet', action='store_true', help='Suppress output')
     parser.add_argument('--print-min-validations', type=int,
@@ -455,7 +459,8 @@ def main():
         backoff_error_min=args.retrain_error_min,
         print_min_validations=args.print_min_validations,
         quiet=args.quiet,
-        history_fetcher=history_fetcher
+        history_fetcher=history_fetcher,
+        max_train_loss=args.max_train_loss
     )
     # Apply aggregation preferences from CLI
     forecaster.aggregation_method = args.aggregation_method

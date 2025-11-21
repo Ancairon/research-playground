@@ -28,7 +28,7 @@ from shared_prediction import single_shot_evaluation
 class LSTMAttentionTuner:
     """Hyperparameter tuner for LSTM with Attention models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None, max_train_loss=None):
         """
         Initialize tuner.
         
@@ -48,6 +48,8 @@ class LSTMAttentionTuner:
         self.csv_file = csv_file
         self.original_config = {}  # Will be populated with original config values
         self.extra_train = extra_train  # Store extra_train for train_window calculation
+        # Optional training abort threshold used to skip clearly bad configs early
+        self.max_train_loss = max_train_loss
         
         # Set max_lookback
         data_size = len(self.df)
@@ -292,7 +294,8 @@ class LSTMAttentionTuner:
             forecaster = UniversalForecaster(
                 model=model,
                 window=lookback,
-                train_window=train_window
+                train_window=train_window,
+                max_train_loss=self.max_train_loss
             )
             
             # Use shared single-shot evaluation logic
@@ -323,7 +326,7 @@ class LSTMAttentionTuner:
                 'config': config,
             }
     
-    def run_tuning(self, search_space, max_time_per_config=300, use_adaptive=True):
+    def run_tuning(self, search_space, max_time_per_config=300, use_adaptive=True, initial_best_mape=None):
         """
         Run hyperparameter tuning with two-phase adaptive search.
         
@@ -368,7 +371,11 @@ class LSTMAttentionTuner:
         print(f"{'='*70}\n")
         
         results = []
-        best_mape_so_far = float('inf')
+        # Initialize best_mape_so_far from caller-provided original MAPE when available
+        try:
+            best_mape_so_far = float(initial_best_mape) if initial_best_mape is not None else float('inf')
+        except Exception:
+            best_mape_so_far = float('inf')
         
         # PHASE 1: EXPLORATION - Sample parameter space
         print(f"{'='*70}")
@@ -378,25 +385,49 @@ class LSTMAttentionTuner:
             print("PHASE 1: EXHAUSTIVE SEARCH - Testing all configurations")
         print(f"{'='*70}\n")
         
+        bad_configs = []
+
+        def _is_similar(a, b, min_matches=None):
+            keys = set(a.keys()) & set(b.keys())
+            if min_matches is None:
+                min_matches = max(1, len(keys) // 2)
+            matches = sum(1 for k in keys if a.get(k) == b.get(k))
+            return matches >= min_matches
+
         for i, config in enumerate(phase1_configs, 1):
+            if any(_is_similar(config, bc) for bc in bad_configs):
+                print(f"\n[{i}/{len(phase1_configs)}] Skipping configuration similar to poor-performing region")
+                continue
+
             print(f"\n[{i}/{len(phase1_configs)}] Testing configuration:")
             for key, val in config.items():
                 print(f"  {key}: {val}")
-            
+
             result = self.evaluate_config(config, verbose=True)
-            results.append(result)
-            
+
             if 'error' in result:
                 print(f"  ❌ ERROR: {result['error']}")
-            else:
-                print(f"  ✓ MAPE: {result['mape']:.2f}% | "
-                      f"RMSE: {result['rmse']:.2f} | "
-                      f"Train: {result['train_time']:.1f}s")
-                
-                # Track best result for progress indication
-                if result['mape'] < best_mape_so_far:
-                    print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
-                    best_mape_so_far = result['mape']
+                bad_configs.append(config)
+                results.append(result)
+                continue
+
+            print(f"  ✓ MAPE: {result['mape']:.2f}% | "
+                  f"RMSE: {result['rmse']:.2f} | "
+                  f"Train: {result['train_time']:.1f}s")
+
+            # Track best result for progress indication
+            if result['mape'] < best_mape_so_far:
+                print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
+                best_mape_so_far = result['mape']
+
+            try:
+                mape_val = float(result.get('mape', float('inf')))
+            except Exception:
+                mape_val = float('inf')
+            if mape_val >= 500.0 or not np.isfinite(mape_val):
+                bad_configs.append(config)
+
+            results.append(result)
         
         # PHASE 2: EXPLOITATION - Refine top performers
         if use_adaptive and len(results) > 0:
@@ -607,8 +638,12 @@ Note:
                         help='Tuning mode (default: auto)')
     parser.add_argument('--output', default=None,
                         help='Output file for results (default: same as config file or lstm_attention_tuning_results.yaml)')
+    parser.add_argument('--save-results', action='store_true',
+                        help='Save the full tuning results to a file. If not set, only the best config YAML may be saved.')
     parser.add_argument('--overwrite-config', action='store_true',
                         help='Overwrite the original config file if a better configuration is found (default: create new file)')
+    parser.add_argument('--max-train-loss', type=float, default=None,
+                        help='Optional max_train_loss to abort training early for poor configs')
     
     args = parser.parse_args()
     
@@ -730,29 +765,55 @@ Note:
         inference_window=args.window,
         max_lookback=args.max_lookback,
         max_training=args.max_training,
-        extra_train=args.extra_train
+        extra_train=args.extra_train,
+        max_train_loss=args.max_train_loss
     )
     
     # Store original config for later use
     tuner.original_config = original_config
     
-    # Evaluate original config first as baseline (if it exists and has the right parameters)
+    # Evaluate original config first as baseline (if it exists).
+    # Be permissive about which keys the original config uses (lookback/window/_-variants).
     original_result = None
-    if original_config and 'lookback' in original_config:
+    if original_config:
         print("\n" + "="*70)
         print("EVALUATING ORIGINAL CONFIG (Baseline)")
         print("="*70)
-        
-        # Extract config parameters for evaluation
+
+        # Extract likely tuning/model keys from the original config and pass them
+        # through for evaluation. Support both hyphenated and underscored keys.
+        possible_keys = [
+            'lookback', 'window', 'hidden-size', 'hidden_size', 'num-layers', 'num_layers',
+            'dropout', 'learning-rate', 'learning_rate', 'epochs', 'batch-size', 'batch_size',
+            'use-differencing', 'use_differencing', 'learning-rate'
+        ]
         original_eval_config = {}
-        for key in ['lookback', 'hidden-size', 'num-layers', 'dropout', 'learning-rate', 'epochs', 'batch-size']:
+        for key in possible_keys:
             if key in original_config:
-                original_eval_config[key.replace('-', '_')] = original_config[key]
-        
+                # Keep original key naming (evaluate_config handles hyphens)
+                original_eval_config[key] = original_config[key]
+
+        # As a fallback, if the original config contains a top-level tuning block or
+        # similar, try using the whole config (filtered) — but be defensive.
+        if not original_eval_config:
+            # Try common aliases
+            for key in ['train-window', 'train_window', 'window']:
+                if key in original_config:
+                    # try to infer lookback from train-window if possible
+                    try:
+                        tw = int(original_config[key])
+                        # infer lookback = train_window - horizon - extra_train (if available)
+                        inferred_lookback = tw - args.horizon - (args.extra_train or 0)
+                        if inferred_lookback > 0:
+                            original_eval_config['lookback'] = int(inferred_lookback)
+                            break
+                    except Exception:
+                        pass
+
         if original_eval_config:
             print(f"Original config parameters: {original_eval_config}")
             original_result = tuner.evaluate_config(original_eval_config, verbose=True)
-            
+
             if 'error' not in original_result:
                 print(f"\n✓ Original config baseline:")
                 print(f"  MAPE: {original_result['mape']:.2f}%")
@@ -772,8 +833,9 @@ Note:
     for param, values in search_space.items():
         print(f"  {param}: {values}")
     
-    # Run tuning
-    results = tuner.run_tuning(search_space)
+    # Run tuning (seed with original MAPE if available so we don't incorrectly
+    # treat worse configs as "NEW BEST" during phase 1)
+    results = tuner.run_tuning(search_space, initial_best_mape=original_mape)
     
     # Add original config result to results list for comparison (if it exists)
     if original_result is not None and 'error' not in original_result:
@@ -786,12 +848,34 @@ Note:
     # Print summary
     tuner.print_summary(results, top_n=5)
     
-    # Save results
-    tuner.save_results(results, args.output)
+    # Save results (only if user explicitly requested saving or provided --output)
+    # Detect whether --output was supplied on the command line so we don't save
+    # results by default when the user didn't ask for them.
+    output_was_provided = any(a.startswith('--output') for a in sys.argv[1:])
+    results_output = args.output
+    if args.config and args.overwrite_config and os.path.abspath(args.output) == os.path.abspath(args.config):
+        config_basename = os.path.splitext(os.path.basename(args.config))[0]
+        results_output = f"{config_basename}_tuning_results.yaml"
+        # Only inform about results file when we will actually write it
+        if args.save_results or output_was_provided:
+            print(f"[Config] --overwrite-config requested; writing tuning RESULTS to separate file: {results_output}")
+
+    if args.save_results or output_was_provided:
+        tuner.save_results(results, results_output)
+    else:
+        print("Skipping saving tuning results file (use --save-results or --output to write).")
+
+    # Ensure best_config_file exists to avoid UnboundLocalError in error paths
+    best_config_file = None
     
-    # Save best config as ready-to-use YAML (only if we beat the original)
-    if results and 'error' not in results[0]:
-        best = results[0]
+    # Save best config as ready-to-use YAML (only if we have at least one valid result)
+    # Find best non-error result
+    best = None
+    for r in results:
+        if r and 'error' not in r:
+            best = r
+            break
+    if best is not None:
         best_mape = best['mape']
         is_best_original = best['config'].get('_original', False)
         
@@ -843,6 +927,8 @@ Note:
                     should_save = False
             
             if not should_save:
+                # Nothing to save, exit early (but avoid leaving best_config_file undefined)
+                print("No config was saved.")
                 return
             
             best_config = {
@@ -890,7 +976,7 @@ Note:
             
             print(f"\n✓ Best config saved to: {best_config_file}")
         
-        # Print best config
+        # Print best config summary
         print(f"\n{'='*70}")
         print("BEST CONFIGURATION:")
         print(f"{'='*70}")
@@ -900,7 +986,17 @@ Note:
         print("\nParameters:")
         for key, val in best['config'].items():
             print(f"  {key}: {val}")
-        print(f"\nYou can now run: python forecast_main.py --config {best_config_file}")
+        print()
+        # If a config file was written, print how to run it; otherwise, note that
+        # the best configuration was not saved to disk.
+        try:
+            if should_save:
+                print(f"You can now run: python forecast_main.py --config {best_config_file}")
+            else:
+                print("Best configuration not saved to disk. To save it, re-run with --overwrite-config or specify --output <file>")
+        except Exception:
+            # Be defensive: avoid crashes if best_config_file isn't defined
+            print("Best configuration computed; provide --output or --overwrite-config to save it to a file.")
         print()
 
 
