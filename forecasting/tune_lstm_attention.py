@@ -684,21 +684,28 @@ Note:
                 print(f"[Config] Will save results to: {args.output} (NOT overwriting original config)")
                 print(f"[Config] Use --overwrite-config to overwrite the original config file")
         
-        # Override with config values
-        if 'csv-file' in original_config:
+        # Override with config values, but prefer explicit CLI arguments when provided.
+        # Detect whether the user passed a specific CLI flag (so CLI wins over config file).
+        def _cli_provided(flag_name):
+            # Look for --flag_name in sys.argv (simple heuristic that covers common usage)
+            return any(arg.startswith(f"--{flag_name}") for arg in sys.argv[1:])
+
+        if 'csv-file' in original_config and not _cli_provided('csv') and not _cli_provided('csv-file'):
             args.csv_file = original_config['csv-file']
-        if 'horizon' in original_config:
+        if 'horizon' in original_config and not _cli_provided('horizon'):
             args.horizon = original_config['horizon']
-        if 'train-window' in original_config:
+        if 'train-window' in original_config and not _cli_provided('train-window') and not _cli_provided('train_window'):
             args.train_window = original_config['train-window']
-        if 'window' in original_config:
+        if 'window' in original_config and not _cli_provided('window'):
             args.window = original_config['window']
-        if 'max-lookback' in original_config and args.max_lookback is None:
+        if 'max-lookback' in original_config and args.max_lookback is None and not _cli_provided('max-lookback'):
             args.max_lookback = original_config['max-lookback']
         
         # Report preserved parameters
+        # Note: 'use-differencing' is intentionally NOT preserved here so it
+        # remains tunable even when present in the config.
         preserved_params = {}
-        for key in ['scaler-type', 'use-differencing', 'bias-correction']:
+        for key in ['scaler-type', 'bias-correction']:
             if key in original_config:
                 preserved_params[key] = original_config[key]
         

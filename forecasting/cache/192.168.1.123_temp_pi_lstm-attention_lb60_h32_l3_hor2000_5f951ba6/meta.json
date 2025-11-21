@@ -1,0 +1,27 @@
+{
+  "hash": "5f951ba611f0ba87e055dcafa9a543e49ce12ed16666af1dee51a971b8c20da8",
+  "readable_name": "192.168.1.123_temp_pi_lstm-attention_lb60_h32_l3_hor2000",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 256,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "192.168.1.123_temp_pi.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 32,
+    "horizon": 2000,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 3,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 4499,
+    "use_differencing": true,
+    "window": 2499
+  }
+}
