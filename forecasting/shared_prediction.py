@@ -63,8 +63,13 @@ def single_shot_evaluation(
     # Validate data requirements
     min_required = train_window + horizon
     if len(data) < min_required:
+        # Provide richer diagnostics to help debug unexpected sizing issues
+        err_msg = (f'Insufficient data: need {min_required} (train_window={train_window} + horizon={horizon}), '
+                   f'have {len(data)}; lookback={lookback}')
+        if verbose:
+            print(f"[DEBUG] {err_msg}")
         return {
-            'error': f'Insufficient data: need {min_required}, have {len(data)}',
+            'error': err_msg,
             'mape': float('inf')
         }
     

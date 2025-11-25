@@ -36,7 +36,11 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, idx):
         X = self.data[idx:idx + self.lookback]
         y = self.data[idx + self.lookback:idx + self.lookback + self.horizon]
-        return torch.FloatTensor(X), torch.FloatTensor(y)
+        # Ensure contiguous float32 numpy arrays before converting to tensors to avoid accidental
+        # dtype/strides issues that can surface in C extensions (BLAS/MKL) on some platforms.
+        X_np = np.ascontiguousarray(np.asarray(X, dtype=np.float32))
+        y_np = np.ascontiguousarray(np.asarray(y, dtype=np.float32))
+        return torch.from_numpy(X_np), torch.from_numpy(y_np)
 
 
 class Attention(nn.Module):
@@ -182,6 +186,21 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         """Train LSTM with Attention."""
         start_time = time.time()
         max_train_loss = kwargs.get('max_train_loss', None)
+
+        # Limit number of CPU threads used by PyTorch / underlying BLAS libraries.
+        # On some systems, highly-parallel BLAS + multithreaded PyTorch dataloading can
+        # trigger subtle heap corruption in native libraries. Restricting threads helps
+        # avoid 'corrupted size vs. prev_size while consolidating' errors observed on CI.
+        try:
+            import os
+            # Only set these when not already constrained by the environment.
+            os.environ.setdefault('OMP_NUM_THREADS', '1')
+            os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+            os.environ.setdefault('MKL_NUM_THREADS', '1')
+            torch.set_num_threads(1)
+        except Exception:
+            # Non-fatal: continue training even if thread limiting isn't available
+            pass
         
         # Validate data size
         if len(data) < self.lookback + self.horizon:

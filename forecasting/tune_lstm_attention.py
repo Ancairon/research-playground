@@ -28,7 +28,7 @@ from shared_prediction import single_shot_evaluation
 class LSTMAttentionTuner:
     """Hyperparameter tuner for LSTM with Attention models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None, max_train_loss=None):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None, max_train_loss=None, extra_train_provided=False):
         """
         Initialize tuner.
         
@@ -48,6 +48,8 @@ class LSTMAttentionTuner:
         self.csv_file = csv_file
         self.original_config = {}  # Will be populated with original config values
         self.extra_train = extra_train  # Store extra_train for train_window calculation
+        # Whether the extra_train value was explicitly provided by the CLI (if True, keep it fixed)
+        self.extra_train_provided = bool(extra_train_provided)
         # Optional training abort threshold used to skip clearly bad configs early
         self.max_train_loss = max_train_loss
         
@@ -149,6 +151,12 @@ class LSTMAttentionTuner:
                 'batch_size': batch_sizes,  # Search batch sizes
                 'use-differencing': [False, True],  # Try both differencing modes
             }
+            # Include extra-train in the search space when it's not fixed by CLI
+            if self.extra_train_provided:
+                # Keep a single fixed value
+                search_space['extra-train'] = [self.extra_train]
+            else:
+                search_space['extra-train'] = [0.005, 0.001, 0.0005,0]
             
             return search_space
         
@@ -166,6 +174,10 @@ class LSTMAttentionTuner:
                 'batch_size': [128],  # Quick: just one batch size
                 'use-differencing': [False, True],
             }
+            if self.extra_train_provided:
+                search_space['extra-train'] = [self.extra_train]
+            else:
+                search_space['extra-train'] = [0.005, 0.001, 0.0005,0]
             
             return search_space
         
@@ -196,6 +208,10 @@ class LSTMAttentionTuner:
                 'batch_size': [64, 128],  # Balanced: test 2 batch sizes
                 'use-differencing': [False, True],
             }
+            if self.extra_train_provided:
+                search_space['extra-train'] = [self.extra_train]
+            else:
+                search_space['extra-train'] = [0.005, 0.001, 0.0005,0]
             
             return search_space
         
@@ -225,6 +241,10 @@ class LSTMAttentionTuner:
                 'batch_size': [32, 64, 128, 256],  # Exhaustive: search all common batch sizes
                 'use-differencing': [False, True],
             }
+            if self.extra_train_provided:
+                search_space['extra-train'] = [self.extra_train]
+            else:
+                search_space['extra-train'] = [0.005, 0.001, 0.0005,0]
             
             return search_space
     
@@ -243,11 +263,37 @@ class LSTMAttentionTuner:
             # Get lookback from config (support 'window' as alias for backwards compatibility)
             lookback = config.get('lookback', config.get('window', 60))
             
-            # Calculate train_window from formula: train_window = lookback + horizon + extra_train
-            if self.extra_train is not None:
-                train_window = lookback + self.horizon + self.extra_train
+            # Determine extra_train: prefer config-specified 'extra-train' if present (from search space),
+            # otherwise fall back to the tuner-level extra_train (CLI-provided), and finally to config train_window.
+            def _to_abs_extra(v):
+                # Convert fractional extra-train (0-1) to absolute count using dataframe size
+                if v is None:
+                    return None
+                try:
+                    fv = float(v)
+                except Exception:
+                    return None
+                data_len = len(self.df)
+                if 0 < fv <= 1:
+                    return int(max(1, fv * data_len))
+                return int(fv)
+
+            extra_from_config = None
+            if 'extra-train' in config:
+                extra_from_config = config.get('extra-train')
+            elif 'extra_train' in config:
+                extra_from_config = config.get('extra_train')
+
+            if extra_from_config is not None:
+                et_abs = _to_abs_extra(extra_from_config)
+                train_window = lookback + self.horizon + et_abs
                 if verbose:
-                    print(f"  Calculated train_window: {train_window} = {lookback} (lookback) + {self.horizon} (horizon) + {self.extra_train} (extra_train)")
+                    print(f"  Calculated train_window: {train_window} = {lookback} (lookback) + {self.horizon} (horizon) + {et_abs} (extra_train from config)")
+            elif self.extra_train is not None:
+                et_abs = _to_abs_extra(self.extra_train)
+                train_window = lookback + self.horizon + et_abs
+                if verbose:
+                    print(f"  Calculated train_window: {train_window} = {lookback} (lookback) + {self.horizon} (horizon) + {et_abs} (extra_train CLI)")
             else:
                 # Fallback to config value if extra_train not set (backwards compatibility)
                 train_window = config.get('train_window', config.get('train-window', lookback + self.horizon))
@@ -278,7 +324,7 @@ class LSTMAttentionTuner:
             
             # Add all config parameters (from tuning search space)
             for key, value in config.items():
-                if key not in ['lookback', 'window', 'train_window', 'train-window']:  # Skip these - they're for tuner, not model
+                if key not in ['lookback', 'window', 'train_window', 'train-window', 'extra-train', 'extra_train']:  # Skip these - they're for tuner, not model
                     # Convert hyphenated keys to underscores
                     if isinstance(key, str) and '-' in key:
                         key = key.replace('-', '_')
