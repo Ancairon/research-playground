@@ -1,0 +1,27 @@
+{
+  "hash": "bddfaaa6ece542bc8410ece39b176de2db8749a2559009667cfacd32e39fcae3",
+  "readable_name": "sawtooth_lstm-attention_lb60_h32_l2_hor720",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "sawtooth.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 32,
+    "horizon": 720,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "robust",
+    "train_window": 1920,
+    "use_differencing": false,
+    "window": 1200
+  }
+}

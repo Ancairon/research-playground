@@ -1,0 +1,18 @@
+classes:
+  constant:
+    - constant.csv
+  # gaussian:
+  #   - gaussian.csv
+  seasonal:
+    - seasonal.csv
+    - 14000secs_pattern_rpi.csv
+  sine-like:
+    - sawtooth.csv
+    - sine.csv
+  step:
+    - step.csv
+  trends:
+    - trend_up.csv
+    - exponential.csv
+    - trend_down.csv
+  

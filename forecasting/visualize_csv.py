@@ -93,9 +93,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python visualize_csv.py csv/wg-disk-use.csv
-  python visualize_csv.py csv/moderate_uptrend_10day.csv --column value
-  python visualize_csv.py csv/my_data.csv --title "My Custom Title" --no-stats
+  python visualize_csv.py ../csv/wg-disk-use.csv
+  python visualize_csv.py ../csv/moderate_uptrend_10day.csv --column value
+  python visualize_csv.py ../csv/my_data.csv --title "My Custom Title" --no-stats
         """
     )
     

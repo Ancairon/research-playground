@@ -18,7 +18,7 @@ class TrainingFailed(Exception):
     pass
 
 
-def train_model(model, series, quiet: bool = False, max_train_loss: float = 1000.0) -> Dict[str, float]:
+def train_model(model, series, quiet: bool = False, max_train_loss: float = 1000.0, max_train_seconds: float = None) -> Dict[str, float]:
     """
     Train a model on the provided series and return training metadata.
 
@@ -34,11 +34,15 @@ def train_model(model, series, quiet: bool = False, max_train_loss: float = 1000
     # Some models return the training time; others may return None and
     # set internal timing. Handle both cases.
     try:
-        # Pass max_train_loss into model.train so models can early-abort during
-        # the epoch loop if they observe an obviously-absurd loss. Models in
-        # this repo accept **kwargs in their train(...) signature, so this is
-        # a safe, non-breaking way to give them the threshold to check.
-        result = model.train(series, max_train_loss=max_train_loss)
+        # Pass max_train_loss and optionally max_train_seconds into model.train
+        # so models can early-abort during the epoch loop if they observe an
+        # obviously-absurd loss or if they've exceeded a time budget. Models
+        # in this repo accept **kwargs in their train(...) signature, so this
+        # is a safe, non-breaking way to supply the constraints.
+        kwargs = {'max_train_loss': max_train_loss}
+        if max_train_seconds is not None:
+            kwargs['max_train_seconds'] = max_train_seconds
+        result = model.train(series, **kwargs)
     except Exception:
         # Re-raise - callers handle exceptions
         raise

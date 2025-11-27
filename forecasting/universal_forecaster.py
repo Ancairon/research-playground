@@ -106,6 +106,7 @@ class UniversalForecaster:
         print_min_validations: int = 3,
         quiet: bool = False,
         max_train_loss: float = None,
+        max_train_seconds: float = None,
         history_fetcher=None
     ):
         """
@@ -151,6 +152,9 @@ class UniversalForecaster:
         self.quiet = quiet
         # Threshold passed down to train_model to allow early-abort during model.train
         self.max_train_loss = max_train_loss
+        # Optional hard limit for training time (seconds) passed down to train helper
+        # and ultimately to model.train via **kwargs. If None, no time limit.
+        self.max_train_seconds = max_train_seconds
         # Callable to fetch historical training data: history_fetcher(seconds_back) -> pd.Series
         self.history_fetcher = history_fetcher
         # Aggregation method for multiple predictions per target timestamp.
@@ -227,7 +231,16 @@ class UniversalForecaster:
             Training time in seconds
         """
         # Use centralized training helper for consistent behavior across callers
-        res = train_model(self.model, data, quiet=True, max_train_loss=self.max_train_loss)
+        # Pass max_train_seconds through to the centralized train helper which
+        # forwards it to the model implementation. This allows models with
+        # long-running epoch loops to abort when the tuner requests a time limit.
+        res = train_model(
+            self.model,
+            data,
+            quiet=True,
+            max_train_loss=self.max_train_loss,
+            max_train_seconds=self.max_train_seconds
+        )
         train_time = res.get('train_time', 0.0)
         self.training_times.append(train_time)
 

@@ -1,0 +1,27 @@
+{
+  "hash": "c7ad22b245584b5b360732defc3e471ccf6b25ba9df26c825a7858332da95753",
+  "readable_name": "trend_up_lstm-attention_lb60_h64_l2_hor720",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "trend_up.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 64,
+    "horizon": 720,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "robust",
+    "train_window": 1506,
+    "use_differencing": true,
+    "window": 786
+  }
+}

@@ -1,0 +1,20 @@
+# LSTM-Attention Best Configuration
+# Generated: 2025-11-27T09:46:39.712545
+# MAPE: 8.33%
+# RMSE: 13.81
+# Train Time: 0.8s
+
+model: lstm-attention
+single-shot: true
+train-window: 864
+horizon: 720
+lookback: 144
+hidden-size: 64
+num-layers: 2
+dropout: 0.2
+learning-rate: 0.0007071067811865476
+epochs: 150
+batch-size: 128
+use-differencing: true
+scaler-type: none
+server-port: 5000

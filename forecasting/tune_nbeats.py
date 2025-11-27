@@ -565,8 +565,10 @@ Examples:
         if 'csv-file' not in config and 'csv_file' not in config:
             # Extract basename without extension from config path
             config_basename = os.path.splitext(os.path.basename(args.config))[0]
-            # Infer CSV filename
-            inferred_csv = f"csv/{config_basename}.csv"
+            # Infer CSV filename (csv directory is at repo root)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(script_dir)
+            inferred_csv = os.path.join(repo_root, 'csv', f"{config_basename}.csv")
             config['csv-file'] = inferred_csv
             print(f"[Config] Inferred CSV file from config name: {inferred_csv}")
         

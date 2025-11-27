@@ -614,8 +614,10 @@ def main():
         if 'csv-file' not in config and 'csv_file' not in config:
             # Extract basename without extension from config path
             config_basename = os.path.splitext(os.path.basename(args.config))[0]
-            # Infer CSV filename
-            inferred_csv = f"csv/{config_basename}.csv"
+            # Infer CSV filename (csv directory is at repo root)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(script_dir)
+            inferred_csv = os.path.join(repo_root, 'csv', f"{config_basename}.csv")
             config['csv-file'] = inferred_csv
             print(f"[Config] Inferred CSV file from config name: {inferred_csv}")
         
@@ -640,9 +642,11 @@ def main():
         print("ERROR: --csv-file is required (or csv-file in config)")
         return
     
-    # Resolve relative path
+    # Resolve relative path (csv directory is at repo root)
     if not csv_file.startswith('/'):
-        csv_file = os.path.join('csv', csv_file) if not csv_file.startswith('csv/') else csv_file
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(script_dir)
+        csv_file = os.path.join(repo_root, 'csv', csv_file) if not csv_file.startswith('csv/') else os.path.join(repo_root, csv_file)
     
     print("="*100)
     print("LSTM HYPERPARAMETER TUNING")

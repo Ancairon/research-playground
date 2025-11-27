@@ -1,0 +1,27 @@
+{
+  "hash": "e43307c2e9296201399916cbb9221d2b4fb9256627d068f1646a35b98792e95e",
+  "readable_name": "exponential_lstm-attention_lb60_h64_l2_hor1080",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 256,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "exponential.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 50,
+    "hidden_size": 64,
+    "horizon": 1080,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 1296,
+    "use_differencing": true,
+    "window": 216
+  }
+}

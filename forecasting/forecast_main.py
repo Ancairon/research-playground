@@ -194,8 +194,8 @@ def main():
                         help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='LSTM/GRU/LSTM-Attn/N-BEATS/TFT: Training batch size')
-    parser.add_argument('--scaler-type', type=str, default='standard', choices=['standard', 'none'],
-                        help='LSTM/GRU/LSTM-Attn: Scaler type. standard=StandardScaler (better for drift), none=no scaling (raw values)')
+    parser.add_argument('--scaler-type', type=str, default='standard', choices=['standard', 'none', 'robust'],
+                        help='LSTM/GRU/LSTM-Attn: Scaler type. standard=StandardScaler, robust=RobustScaler, none=no scaling (raw values)')
     parser.add_argument('--bias-correction', type=bool, default=True,
                         help='LSTM/GRU/LSTM-Attn: Enable automatic bias correction to fix systematic over/under-prediction')
     parser.add_argument('--use-differencing', type=bool, default=False,
@@ -261,7 +261,7 @@ def main():
                         help='Minimum error threshold for spike retrain (MAPE %%)')
 
     # Training safety
-    parser.add_argument('--max-train-loss', type=float, default=1000.0,
+    parser.add_argument('--max-train-loss', type=float, default=None,
                         help='Maximum acceptable training loss (avg per-epoch MSE). Exceeding this will abort training')
 
     # Output
@@ -282,7 +282,7 @@ def main():
     
     # CSV Mode
     parser.add_argument('--csv-file', type=str,
-                        help='CSV filename in csv/ folder (enables CSV replay mode)')
+                        help='Path to CSV file (enables CSV replay mode)')
     parser.add_argument('--csv-fast', action='store_true',
                         help='Fast replay mode - process CSV data as fast as possible (no sleep)')
     
@@ -320,8 +320,10 @@ def main():
         if 'csv-file' not in config and 'csv_file' not in config:
             # Extract basename without extension from config path
             config_basename = os.path.splitext(os.path.basename(config_path))[0]
-            # Try to find a matching CSV file
-            inferred_csv = f"{config_basename}.csv"
+            # Try to find a matching CSV file (csv directory is at repo root)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(script_dir)
+            inferred_csv = os.path.join(repo_root, 'csv', f"{config_basename}.csv")
             config['csv-file'] = inferred_csv
             if not args.quiet:
                 print(f"[Config] Inferred CSV file from config name: {inferred_csv}")

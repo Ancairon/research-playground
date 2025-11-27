@@ -17,7 +17,7 @@ import warnings
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 
 from models.base_model import BaseTimeSeriesModel
 
@@ -154,10 +154,12 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         # Initialize scaler
         if scaler_type == 'standard':
             self.scaler = StandardScaler()
+        elif scaler_type == 'robust':
+            self.scaler = RobustScaler()
         elif scaler_type == 'none':
             self.scaler = None
         else:
-            raise ValueError(f"Invalid scaler_type: {scaler_type}. Must be 'standard' or 'none'")
+            raise ValueError(f"Invalid scaler_type: {scaler_type}. Must be 'standard', 'robust' or 'none'")
             
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.last_data = None
@@ -186,6 +188,8 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         """Train LSTM with Attention."""
         start_time = time.time()
         max_train_loss = kwargs.get('max_train_loss', None)
+        # Optional time budget (seconds) to abort long-running training loops
+        max_train_seconds = kwargs.get('max_train_seconds', None)
 
         # Limit number of CPU threads used by PyTorch / underlying BLAS libraries.
         # On some systems, highly-parallel BLAS + multithreaded PyTorch dataloading can
@@ -213,10 +217,16 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         if self.use_differencing:
             # Store the last value for undifferencing predictions
             self.last_value = data.values[-1]
-            # Convert to first differences
-            data_values = np.diff(data.values)
-            # Pad with first value to maintain length
-            data_values = np.concatenate([[0], data_values])
+    
+            diffs = np.diff(data.values)
+            # Avoid padding with zero which biases the scaler; instead repeat
+            # the first real difference (or use 0 if no diffs) to keep alignment.
+            if diffs.size == 0:
+                pad = 0.0
+                data_values = np.array([pad], dtype=np.float32)
+            else:
+                pad = float(diffs[0])
+                data_values = np.concatenate([[pad], diffs])
         else:
             data_values = data.values
         
@@ -231,6 +241,20 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         else:
             # Use StandardScaler
             data_scaled = self.scaler.fit_transform(data_values.reshape(-1, 1)).flatten()
+            if not getattr(self, 'quiet', False):
+                try:
+                    # RobustScaler exposes `center_` (median) and `scale_`; StandardScaler exposes `mean_` and `scale_`.
+                    mean_or_center = getattr(self.scaler, 'mean_', None)
+                    if mean_or_center is None:
+                        mean_or_center = getattr(self.scaler, 'center_', None)
+                    scale_attr = getattr(self.scaler, 'scale_', None)
+                    print(f"  [Transform] scaler center/mean={mean_or_center} scale={scale_attr} (type={type(self.scaler).__name__})")
+                    # Print a small tail sample to inspect transform effect
+                    tail_raw = data_values[-5:] if len(data_values) >= 5 else data_values
+                    tail_scaled = data_scaled[-5:] if len(data_scaled) >= 5 else data_scaled
+                    print(f"  [Transform] raw tail={tail_raw} scaled tail={tail_scaled}")
+                except Exception:
+                    pass
         
         # Create dataset
         dataset = TimeSeriesDataset(data_scaled, self.lookback, self.horizon)
@@ -328,6 +352,13 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
                     if patience_counter >= patience:
                         print(f"  Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
                         break
+
+                # Enforce optional wall-clock training time budget (checked per-epoch)
+                if max_train_seconds is not None:
+                    elapsed = time.time() - start_time
+                    if elapsed > float(max_train_seconds):
+                        print(f"  Aborting training: elapsed {elapsed:.1f}s > max_train_seconds={max_train_seconds}s")
+                        break
         
         self.is_trained = True
         self.last_data = data_scaled[-self.lookback:]
@@ -405,6 +436,12 @@ class LSTMAttentionModel(BaseTimeSeriesModel):
         else:
             # StandardScaler - use inverse_transform
             predictions = self.scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
+
+            if not getattr(self, 'quiet', False):
+                try:
+                    print(f"  [Transform] preds_scaled_sample={predictions_scaled[:5]} preds_de_scaled_sample={predictions[:5]}")
+                except Exception:
+                    pass
         
         # Reverse differencing if enabled
         if self.use_differencing:
