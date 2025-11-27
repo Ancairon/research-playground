@@ -20,6 +20,9 @@ from datetime import datetime
 from itertools import product
 import argparse
 import random
+import subprocess
+import tempfile
+import shutil
 
 from models import create_model
 from universal_forecaster import UniversalForecaster
@@ -48,6 +51,8 @@ class LSTMAttentionTuner:
         self.train_window = train_window
         self.inference_window = inference_window
         self.csv_file = csv_file
+        # Number of points reserved as final holdout (absolute int). If 0, no holdout.
+        self.holdout_horizon = 0
         self.original_config = {}  # Will be populated with original config values
         self.extra_train = extra_train  # Store extra_train for train_window calculation
         # Whether the extra_train value was explicitly provided by the CLI (if True, keep it fixed)
@@ -79,6 +84,8 @@ class LSTMAttentionTuner:
         print(f"Will predict {self.horizon} steps ahead")
         if self.max_time_per_config:
             print(f"Max time per config: {self.max_time_per_config}s")
+        if hasattr(self, 'holdout_horizon') and self.holdout_horizon:
+            print(f"Holdout reserved (final): {self.holdout_horizon} points")
         
     def _estimate_training_time(self, config) -> float:
         """
@@ -382,6 +389,18 @@ class LSTMAttentionTuner:
                 if verbose:
                     print(f"  WARNING: train_window {train_window} < minimum {min_train_window}, using minimum")
                 train_window = min_train_window
+            # Enforce that tuning does NOT touch the final held-out portion
+            holdout = int(getattr(self, 'holdout_horizon', 0) or 0)
+            available_for_tuning = len(self.df) - holdout
+            if train_window > available_for_tuning:
+                if verbose:
+                    print(f"  ⏭️  SKIPPING: train_window {train_window} would exceed available_for_tuning {available_for_tuning} (would touch holdout)")
+                return {
+                    'error': f'Skipped: train_window {train_window} would touch reserved holdout ({holdout} points)',
+                    'mape': float('inf'),
+                    'config': config,
+                    'skipped': True,
+                }
             
             # Prepare config for model - use forecast_main's parameter names
             model_kwargs = {
@@ -423,9 +442,22 @@ class LSTMAttentionTuner:
             
             # Use shared single-shot evaluation logic
             eval_start = time.time()
+            # If a final holdout was reserved, slice the dataframe so tuning
+            # evaluates on the END of the available_for_tuning portion (i.e.,
+            # does not touch the reserved final holdout). This makes tuning
+            # metrics different from the final held-out evaluation.
+            holdout = int(getattr(self, 'holdout_horizon', 0) or 0)
+            if holdout > 0:
+                available_for_tuning = len(self.df) - holdout
+                data_for_eval = self.df['value'].iloc[:available_for_tuning]
+                if verbose:
+                    print(f"  NOTE: using truncated data for tuning (available_for_tuning={available_for_tuning})")
+            else:
+                data_for_eval = self.df['value']
+
             result = single_shot_evaluation(
                 forecaster=forecaster,
-                data=self.df['value'],
+                data=data_for_eval,
                 train_window=train_window,
                 lookback=lookback,
                 horizon=self.horizon,
@@ -453,6 +485,86 @@ class LSTMAttentionTuner:
                 'mape': float('inf'),
                 'config': config,
             }
+    def final_evaluate(self, config, verbose=False):
+        """
+        After tuning completes, perform a single-shot evaluation on the reserved
+        final holdout horizon. Trains on data up to (N - holdout) and evaluates
+        on the last `holdout` points.
+        """
+        holdout = int(getattr(self, 'holdout_horizon', 0) or 0)
+        if holdout <= 0:
+            if verbose:
+                print("No holdout reserved; skipping final held-out evaluation")
+            return None
+
+        data_size = len(self.df)
+        available = data_size - holdout
+
+        # Determine lookback from config (the model's lookback hyperparameter)
+        lookback = config.get('lookback', config.get('window', 60))
+
+        # Determine extra_train if present (convert fractional to absolute)
+        extra = config.get('extra-train', config.get('extra_train', None))
+        if isinstance(extra, float) and 0 < extra <= 1:
+            extra = int(max(1, extra * data_size))
+        extra_abs = int(extra) if extra is not None else 0
+
+        # For final held-out evaluation we must compute the train_window using
+        # the held-out horizon (not the tuner's horizon). The training should
+        # end immediately before the held-out block and the lookback used for
+        # prediction should be the last `lookback` points of that training slice.
+        train_window = lookback + holdout + extra_abs
+
+        min_train_window = lookback + holdout
+        if train_window < min_train_window:
+            train_window = min_train_window
+
+        if train_window > available:
+            # Not enough data to train without touching holdout
+            return {
+                'error': 'Not enough data for held-out evaluation',
+                'skipped': True,
+                'config': config,
+            }
+
+        # Build model kwargs similarly to evaluate_config
+        model_kwargs = {
+            'horizon': holdout,
+            'lookback': lookback,
+            'random_state': 42,
+        }
+        for key, value in config.items():
+            if key not in ['lookback', 'window', 'train_window', 'train-window', 'extra-train', 'extra_train']:
+                if isinstance(key, str) and '-' in key:
+                    key = key.replace('-', '_')
+                model_kwargs[key] = value
+
+        model = create_model('lstm-attention', **model_kwargs)
+        forecaster = UniversalForecaster(
+            model=model,
+            window=lookback,
+            train_window=train_window,
+            max_train_loss=self.max_train_loss,
+            max_train_seconds=self.max_time_per_config
+        )
+
+        if verbose:
+            print(f"Running final held-out evaluation: train_window={train_window}, holdout={holdout}")
+
+        result = single_shot_evaluation(
+            forecaster=forecaster,
+            data=self.df['value'],
+            train_window=train_window,
+            lookback=lookback,
+            horizon=holdout,
+            verbose=verbose
+        )
+
+        # Attach config and mark as holdout result
+        if isinstance(result, dict):
+            result['config'] = config
+            result['heldout'] = True
+        return result
     
     def run_tuning(self, search_space, max_time_per_config=300, use_adaptive=True, initial_best_mape=None):
         """
@@ -759,6 +871,8 @@ Note:
     parser.add_argument('--config', help='Path to YAML config file (alternative to --csv)')
     parser.add_argument('--horizon', type=float, default=0.2,
                         help='Forecast horizon - absolute value or fraction (0-1) of dataset size (default: 0.2 = 20%% of data)')
+    parser.add_argument('--holdout-horizon', type=float, default=None,
+                        help='Final holdout horizon to reserve from the end of the CSV for unbiased evaluation. Accepts fraction (0-1) or absolute int. Defaults to same as --horizon if not provided.')
     parser.add_argument('--extra-train', type=float, default=None,
                         help='Extra training data beyond lookback+horizon - absolute value or fraction (0-1) of dataset size (default: None = use tuner search space). Total train_window = lookback + horizon + extra_train')
     parser.add_argument('--mode', choices=['quick', 'balanced', 'exhaustive', 'auto'],
@@ -770,10 +884,14 @@ Note:
                         help='Save the full tuning results to a file. If not set, only the best config YAML may be saved.')
     parser.add_argument('--overwrite-config', action='store_true',
                         help='Overwrite the original config file if a better configuration is found (default: create new file)')
+    parser.add_argument('--force-overwrite', action='store_true',
+                        help='Force writing the best config file even if it does not improve over the original (backs up original)')
     parser.add_argument('--max-train-loss', type=float, default=None,
                         help='Optional max_train_loss to abort training early for poor configs')
     parser.add_argument('--max-time', type=int, default=120,
                         help='Maximum seconds per config before skipping (default: 120s). Set to 0 to disable.')
+    parser.add_argument('--run-forecaster', action='store_true',
+                        help='After tuning, invoke forecasting/forecast_main.py with the best config (runs in foreground).')
     
     args = parser.parse_args()
     
@@ -864,6 +982,10 @@ Note:
     
     # Convert fractions to absolute values (only when provided)
     args.horizon = to_absolute(args.horizon, data_size, 'horizon')
+    # If holdout_horizon is not provided, default to same fraction as horizon
+    if getattr(args, 'holdout_horizon', None) is None:
+        args.holdout_horizon = args.horizon
+    args.holdout_horizon = to_absolute(args.holdout_horizon, data_size, 'holdout-horizon')
     if args.extra_train is not None:
         args.extra_train = to_absolute(args.extra_train, data_size, 'extra_train')
     else:
@@ -914,6 +1036,8 @@ Note:
         max_train_loss=args.max_train_loss,
         max_time_per_config=args.max_time if args.max_time > 0 else None
     )
+    # Reserve final holdout from tuning (absolute points)
+    tuner.holdout_horizon = int(args.holdout_horizon or 0)
     
     # Store original config for later use
     tuner.original_config = original_config
@@ -945,7 +1069,18 @@ Note:
             print("EVALUATING ORIGINAL CONFIG (Baseline)")
             print("="*70)
             print(f"Original config parameters: {original_eval_config}")
-            original_result = tuner.evaluate_config(original_eval_config, verbose=True)
+            # If a holdout was reserved, evaluate the ORIGINAL config using the
+            # held-out evaluation logic so the baseline metric matches the
+            # final held-out evaluation semantics. Otherwise, fall back to
+            # the standard per-config evaluation.
+            if getattr(tuner, 'holdout_horizon', 0):
+                original_result = tuner.final_evaluate(original_eval_config, verbose=True)
+                # final_evaluate returns heldout=True; but for compatibility
+                # with later code, ensure it has the same metric keys expected
+                if original_result is None:
+                    original_result = {'error': 'Heldout evaluation not run', 'mape': float('inf'), 'config': original_eval_config}
+            else:
+                original_result = tuner.evaluate_config(original_eval_config, verbose=True)
 
             if 'error' not in original_result:
                 print(f"\n✓ Original config baseline:")
@@ -1017,6 +1152,8 @@ Note:
     # Save best config as ready-to-use YAML (only if we have at least one valid result)
     # Find best non-error result
     best = None
+    # Placeholder for final held-out evaluation result (computed after best selection)
+    holdout_result = None
     for r in results:
         if r and 'error' not in r:
             best = r
@@ -1024,12 +1161,25 @@ Note:
     if best is not None:
         best_mape = best['mape']
         is_best_original = best['config'].get('_original', False)
+        # Always run final held-out evaluation (if user reserved a holdout),
+        # even if we will not overwrite the config file. This gives an honest
+        # final metric for the reserved data.
+        try:
+            holdout_result = tuner.final_evaluate(best['config'], verbose=True)
+        except Exception as e:
+            print(f"Warning: held-out evaluation failed: {e}")
+            holdout_result = None
         
-        # Check if we should save (don't save if original is best, or if we didn't improve)
+        # Check if we should save. By default we only save if the tuned config
+        # improves over the original. The CLI flag --force-overwrite can be
+        # used to force writing the best config even when it is not better.
         should_save = True
-        
-        if is_best_original:
-            # Original config is the best - don't overwrite
+        force = getattr(args, 'force_overwrite', False)
+        if force:
+            print("[Config] --force-overwrite requested: will write best config even if not improved (a backup will be created if overwriting original).")
+
+        if is_best_original and not force:
+            # Original config is the best - don't overwrite unless forced
             should_save = False
             print(f"\n{'='*70}")
             print(f"✓ Original config is ALREADY OPTIMAL!")
@@ -1037,23 +1187,31 @@ Note:
             print(f"   No tuned config beat the original")
             print(f"   Config file will NOT be overwritten")
             print(f"{'='*70}\n")
-        elif original_mape is not None:
-            if best_mape >= original_mape:
-                should_save = False
-                print(f"\n{'='*70}")
-                print(f"⚠️  Tuning did NOT improve over original config")
+        elif original_mape is not None and best_mape >= original_mape and not force:
+            # Tuned result did not improve - do not overwrite unless forced
+            should_save = False
+            print(f"\n{'='*70}")
+            print(f"⚠️  Tuning did NOT improve over original config")
+            print(f"   Original MAPE: {original_mape:.2f}%")
+            print(f"   Best new MAPE: {best_mape:.2f}%")
+            print(f"   Config file will NOT be overwritten")
+            print(f"{'='*70}\n")
+        elif original_mape is not None and best_mape >= original_mape and force:
+            print(f"\n{'='*70}")
+            print(f"⚠️  Tuning did NOT improve, but --force-overwrite will write the best config")
+            print(f"   Original MAPE: {original_mape:.2f}%")
+            print(f"   Best new MAPE: {best_mape:.2f}%")
+            print(f"{'='*70}\n")
+        else:
+            print(f"\n{'='*70}")
+            print(f"✅ Tuning IMPROVED over original config!")
+            if original_mape is not None:
                 print(f"   Original MAPE: {original_mape:.2f}%")
-                print(f"   Best new MAPE: {best_mape:.2f}%")
-                print(f"   Config file will NOT be overwritten")
-                print(f"{'='*70}\n")
-            else:
-                print(f"\n{'='*70}")
-                print(f"✅ Tuning IMPROVED over original config!")
-                print(f"   Original MAPE: {original_mape:.2f}%")
-                print(f"   Best new MAPE: {best_mape:.2f}%")
+            print(f"   Best new MAPE: {best_mape:.2f}%")
+            if original_mape is not None:
                 print(f"   Improvement: {original_mape - best_mape:.2f}% reduction")
-                print(f"   Config file will be updated")
-                print(f"{'='*70}\n")
+            print(f"   Config file will be updated")
+            print(f"{'='*70}\n")
         
         if should_save:
             # Calculate the actual train_window based on best config using the formula
@@ -1066,8 +1224,10 @@ Note:
             # Safety check: If output file is the same as input config, only overwrite if we improved
             best_config_file = args.output
             if args.config and os.path.abspath(args.output) == os.path.abspath(args.config):
-                if original_mape is None or best_mape < original_mape:
-                    print(f"[Config] Overwriting original config with improved results")
+                if original_mape is None or best_mape < original_mape or force:
+                    # Overwrite original config. When --force-overwrite is used
+                    # we intentionally do NOT create a backup.
+                    print(f"[Config] Overwriting original config with results{' (forced)' if force else ''}")
                 else:
                     print(f"[Config] ERROR: Refusing to overwrite config - no improvement!")
                     should_save = False
@@ -1079,7 +1239,6 @@ Note:
             
             best_config = {
                 '# LSTM-Attention Best Configuration': None,
-                '# Generated': datetime.now().isoformat(),
                 '# MAPE': f"{best['mape']:.2f}%",
                 '# RMSE': f"{best['rmse']:.2f}",
                 '# Train Time': f"{best['train_time']:.1f}s",
@@ -1105,16 +1264,24 @@ Note:
                     if key in tuner.original_config and key not in best_config:
                         best_config[key] = tuner.original_config[key]
             
-            # Add server config
-            best_config['server-port'] = 5000
+            # Do not add server port to best config (not needed)
+
+            # holdout_result will be computed earlier (after best selection)
             
             with open(best_config_file, 'w') as f:
                 # Write comments manually since yaml.dump doesn't preserve them well
                 f.write(f"# LSTM-Attention Best Configuration\n")
-                f.write(f"# Generated: {datetime.now().isoformat()}\n")
                 f.write(f"# MAPE: {best['mape']:.2f}%\n")
                 f.write(f"# RMSE: {best['rmse']:.2f}\n")
                 f.write(f"# Train Time: {best['train_time']:.1f}s\n\n")
+                # If we ran a held-out evaluation, write its summary too
+                if holdout_result and isinstance(holdout_result, dict) and 'error' not in holdout_result and not holdout_result.get('skipped'):
+                    try:
+                        f.write(f"# HELDOUT_MAPE: {holdout_result.get('mape', float('nan')):.2f}%\n")
+                        f.write(f"# HELDOUT_RMSE: {holdout_result.get('rmse', float('nan')):.2f}\n\n")
+                    except Exception:
+                        # Be defensive: some results may not include numeric fields
+                        pass
                 
                 # Write the actual config
                 config_to_write = {k: v for k, v in best_config.items() if not k.startswith('#')}
@@ -1133,6 +1300,19 @@ Note:
         for key, val in best['config'].items():
             print(f"  {key}: {val}")
         print()
+        # Print held-out evaluation summary if available
+        if 'holdout_result' in locals() and holdout_result is not None:
+            if isinstance(holdout_result, dict) and 'error' not in holdout_result and not holdout_result.get('skipped'):
+                print("Held-out evaluation:")
+                try:
+                    print(f"  MAPE: {holdout_result.get('mape', float('nan')):.2f}%")
+                    print(f"  RMSE: {holdout_result.get('rmse', float('nan')):.2f}")
+                    print()
+                except Exception:
+                    pass
+            elif isinstance(holdout_result, dict) and holdout_result.get('skipped'):
+                print("Held-out evaluation skipped: not enough data to evaluate on reserved holdout.")
+                print()
         # If a config file was written, print how to run it; otherwise, note that
         # the best configuration was not saved to disk.
         try:
@@ -1144,6 +1324,36 @@ Note:
             # Be defensive: avoid crashes if best_config_file isn't defined
             print("Best configuration computed; provide --output or --overwrite-config to save it to a file.")
         print()
+
+        # Optionally run the forecaster with the best config
+        if args.run_forecaster:
+            # Prepare config path: use saved file if it exists, otherwise write a temp file
+            cfg_to_run = None
+            if should_save and best_config_file and os.path.exists(best_config_file):
+                cfg_to_run = os.path.abspath(best_config_file)
+            else:
+                # Write best_config dict to a temporary YAML file for immediate use
+                try:
+                    tmp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml')
+                    config_to_write = {k: v for k, v in best_config.items() if not k.startswith('#')}
+                    yaml.dump(config_to_write, tmp, default_flow_style=False, sort_keys=False)
+                    tmp.close()
+                    cfg_to_run = tmp.name
+                    print(f"Running forecaster with temporary config: {cfg_to_run}")
+                except Exception as e:
+                    print(f"Failed to write temp config for forecaster: {e}")
+                    cfg_to_run = None
+
+            if cfg_to_run:
+                forecaster_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'forecast_main.py')
+                cmd = [sys.executable, forecaster_script, '--config', cfg_to_run]
+                print(f"Launching forecaster: {' '.join(cmd)}")
+                try:
+                    subprocess.run(cmd)
+                except KeyboardInterrupt:
+                    print("Forecaster interrupted by user.")
+                except Exception as e:
+                    print(f"Error running forecaster: {e}")
 
 
 if __name__ == '__main__':
