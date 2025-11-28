@@ -11,7 +11,7 @@ import warnings
 
 from sklearn.ensemble import RandomForestRegressor
 
-from models.base_model import BaseTimeSeriesModel
+from .base_model import BaseTimeSeriesModel
 
 
 class RandomForestModel(BaseTimeSeriesModel):

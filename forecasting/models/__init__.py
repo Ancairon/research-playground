@@ -3,15 +3,16 @@ Model factory - creates forecasting models by name.
 """
 
 from typing import Dict, Any, Type
-from models.base_model import BaseTimeSeriesModel
-from models.xgboost_model import XGBoostModel
-from models.lstm_model import LSTMModel
-from models.random_forest_model import RandomForestModel
-from models.extra_trees_model import ExtraTreesModel
-from models.gru_model import GRUModel
-from models.lstm_attention_model import LSTMAttentionModel
-from models.nbeats_model import NBEATSModel
-from models.tft_model import TFTModel
+from .base_model import BaseTimeSeriesModel
+from .xgboost_model import XGBoostModel
+from .lstm_model import LSTMModel
+from .random_forest_model import RandomForestModel
+from .extra_trees_model import ExtraTreesModel
+from .gru_model import GRUModel
+from .lstm_attention_model import LSTMAttentionModel
+from .nbeats_model import NBEATSModel
+from .tft_model import TFTModel
+from .timesfm_model import TimesFMModel
 
 
 # Registry of available models
@@ -27,6 +28,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseTimeSeriesModel]] = {
     'lstm-attn': LSTMAttentionModel,  # Alias
     'nbeats': NBEATSModel,
     'tft': TFTModel,
+    'timesfm': TimesFMModel,
+    'times-fm': TimesFMModel,
 }
 
 

@@ -402,6 +402,13 @@ def main():
         model_kwargs['epochs'] = args.epochs
         model_kwargs['batch_size'] = args.batch_size
 
+    elif args.model in ['timesfm', 'times-fm']:
+        # TimesFM is pre-trained-only; allow passing a lookback (window) so
+        # predictions use a reasonable history size instead of the entire
+        # training window (which can cause reshape/patching errors).
+        model_kwargs['lookback'] = args.lookback if args.lookback is not None else args.window
+        # future: allow hf_load_kwargs via config
+
     elif args.model in ['randomforest', 'rf', 'extratrees', 'et']:
         model_kwargs['n_estimators'] = args.n_estimators
         model_kwargs['max_depth'] = args.max_depth
@@ -738,9 +745,9 @@ def main():
                 'actual': float(actual_values[i]) if i < len(actual_values) else None
             })
         
-        if not args.quiet:
-            for i, (pred, actual, error) in enumerate(zip(predictions, actual_values, errors)):
-                print(f"[Single-Shot] Step {i+1}/{args.horizon}: Pred={pred:.3f}, Actual={actual:.3f}, MAPE={error:.2f}%")
+        # if not args.quiet:
+        #     for i, (pred, actual, error) in enumerate(zip(predictions, actual_values, errors)):
+        #         print(f"[Single-Shot] Step {i+1}/{args.horizon}: Pred={pred:.3f}, Actual={actual:.3f}, MAPE={error:.2f}%")
         
         # Send to visualization server if running
         if server_started:

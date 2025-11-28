@@ -11,7 +11,7 @@ import warnings
 
 from sklearn.ensemble import ExtraTreesRegressor
 
-from models.base_model import BaseTimeSeriesModel
+from .base_model import BaseTimeSeriesModel
 
 
 class ExtraTreesModel(BaseTimeSeriesModel):

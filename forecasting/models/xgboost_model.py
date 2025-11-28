@@ -14,7 +14,7 @@ import contextlib
 from pycaret.time_series import TSForecastingExperiment
 import xgboost
 
-from models.base_model import BaseTimeSeriesModel
+from .base_model import BaseTimeSeriesModel
 
 # Patch XGBoost version if missing
 if not hasattr(xgboost, "__version__"):

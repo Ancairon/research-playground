@@ -1,0 +1,27 @@
+{
+  "hash": "0512cfe6e4d6dbf5a38c35134750ff1652cfa8960a096cabb65780d3127a472a",
+  "readable_name": "sine_timesfm_lb60_h128_l2_hor720",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "sine.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 128,
+    "horizon": 720,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "timesfm",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 840,
+    "use_differencing": false,
+    "window": 120
+  }
+}

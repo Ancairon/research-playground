@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 
-from models.base_model import BaseTimeSeriesModel
+from .base_model import BaseTimeSeriesModel
 
 
 class TimeSeriesDataset(Dataset):
