@@ -10,6 +10,7 @@ from universal_forecaster import UniversalForecaster
 from models import create_model, list_available_models, get_model_info
 from config_cache import ConfigFingerprint, load_cached_results, save_cache
 from shared_prediction import evaluate_predictions, single_shot_evaluation
+from smoothing import apply_smoothing
 import requests
 import subprocess
 import pandas as pd
@@ -231,6 +232,13 @@ def main():
                         default=1, help='Number of predictions to average')
     parser.add_argument('--prediction-interval', type=float,
                         default=1.0, help='Seconds between predictions')
+    parser.add_argument('--smoothing-method', type=str, default=None,
+                        choices=[None, 'moving_average', 'ma', 'ewma', 'exponential'],
+                        help='Optional data smoothing method applied to training/actuals (None=disabled)')
+    parser.add_argument('--smoothing-window', type=int, default=3,
+                        help='Window size for moving-average smoothing (integer)')
+    parser.add_argument('--smoothing-alpha', type=float, default=0.2,
+                        help='Alpha for exponential smoothing (0-1)')
 
     # Retraining parameters
     parser.add_argument('--retrain-scale', type=float,
@@ -455,6 +463,9 @@ def main():
         window=args.window,
         train_window=train_window,
         prediction_smoothing=args.prediction_smoothing,
+        smoothing_method=args.smoothing_method,
+        smoothing_window=args.smoothing_window,
+        smoothing_alpha=args.smoothing_alpha,
         retrain_scale=args.retrain_scale,
         retrain_min=args.retrain_min,
         retrain_use_mad=not args.no_mad,
@@ -651,6 +662,20 @@ def main():
                 }
                 for ts, val in zip(hist_df.index, hist_df['value'].values)
             ]
+
+            # Also include smoothed historical series for visualization (preserve timestamps)
+            try:
+                smoothed_series = apply_smoothing(hist_df['value'].sort_index(), method=getattr(forecaster, 'smoothing_method', None), window=getattr(forecaster, 'smoothing_window', 3), alpha=getattr(forecaster, 'smoothing_alpha', 0.2))
+                # Use the already-built `historical_data` timestamps so they match exactly
+                smoothed_historical = [
+                    {
+                        'timestamp': hd['timestamp'],
+                        'value': float(v)
+                    }
+                    for hd, v in zip(historical_data, smoothed_series.values)
+                ]
+            except Exception:
+                smoothed_historical = None
             
             if not args.quiet:
                 print(f"[Single-Shot] Sending {len(historical_data)} historical data points (training window) to visualization")
@@ -787,6 +812,7 @@ def main():
                         'actual': last_actual,
                         'csv_mode': csv_source is not None,
                         'historical_data': historical_data,
+                        'smoothed_historical': smoothed_historical,
                         'future_actuals': future_actuals,
                         'single_shot': True,
                         'mean_error': mean_error
@@ -1082,7 +1108,54 @@ def main():
                         }
                         for ts, val in zip(hist_df.index, hist_df.values)
                     ]
-                
+                # Compute smoothed historical series for visualization (if configured)
+                try:
+                    if csv_source:
+                        # Use the same hist_df slice so timestamps match what we sent as historical_data
+                        if 'hist_df' in locals() and len(hist_df) > 0:
+                            smoothed_series = apply_smoothing(
+                                hist_df.sort_index(),
+                                method=getattr(forecaster, 'smoothing_method', None),
+                                window=getattr(forecaster, 'smoothing_window', 3),
+                                alpha=getattr(forecaster, 'smoothing_alpha', 0.2)
+                            )
+                            # Build smoothed_historical by reusing `historical_data` timestamps when lengths match
+                            if historical_data and len(historical_data) == len(smoothed_series.values):
+                                smoothed_historical = [
+                                    {
+                                        'timestamp': hd['timestamp'],
+                                        'value': float(v)
+                                    }
+                                    for hd, v in zip(historical_data, smoothed_series.values)
+                                ]
+                            else:
+                                # Fallback: pair with hist_df index if lengths differ
+                                smoothed_historical = [
+                                    {
+                                        'timestamp': ts.isoformat(),
+                                        'value': float(v)
+                                    }
+                                    for ts, v in zip(hist_df.index, smoothed_series.values)
+                                ]
+                        else:
+                            smoothed_historical = None
+                    else:
+                        smoothed_series = apply_smoothing(
+                            live_df_value.sort_index(),
+                            method=getattr(forecaster, 'smoothing_method', None),
+                            window=getattr(forecaster, 'smoothing_window', 3),
+                            alpha=getattr(forecaster, 'smoothing_alpha', 0.2)
+                        )
+                        smoothed_historical = [
+                            {
+                                'timestamp': ts.isoformat(),
+                                'value': float(v)
+                            }
+                            for ts, v in zip(live_df_value.index, smoothed_series.values)
+                        ]
+                except Exception:
+                    smoothed_historical = None
+
                 requests.post(
                     f'http://localhost:{args.live_server_port}/predictions',
                     json={
@@ -1094,7 +1167,8 @@ def main():
                         'backoff': in_backoff,
                         'actual': current_value,
                         'csv_mode': csv_source is not None,
-                        'historical_data': historical_data
+                        'historical_data': historical_data,
+                        'smoothed_historical': smoothed_historical,
                     },
                     # Give the local prediction server a bit more time to respond
                     timeout=2.0

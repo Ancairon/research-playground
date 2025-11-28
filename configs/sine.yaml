@@ -6,7 +6,8 @@
 # HELDOUT_MAPE: 3.86%
 # HELDOUT_RMSE: 4.19
 
-model: lstm-attention
+# model: lstm-attention
+model: timesfm
 single-shot: true
 train-window: 840
 horizon: 720

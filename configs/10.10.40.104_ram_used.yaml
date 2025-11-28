@@ -8,6 +8,10 @@
 
 model: lstm-attention
 single-shot: true
+smoothing-method: moving_average
+smoothing-window: 100
+# smoothing-method: ewma
+# smoothing-alpha: 0.3
 train-window: 2862
 horizon: 2802
 lookback: 60

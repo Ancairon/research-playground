@@ -159,6 +159,10 @@
         <span>Actual (Metrics)</span>
       </div>
       <div class="legend-item">
+        <span class="legend-box" style="background: #2196F3; border: 2px dashed #2196F3; height: 0;"></span>
+        <span>Smoothed (ML input)</span>
+      </div>
+      <div class="legend-item">
         <span class="legend-box" style="background: #9C27B0; border: 2px dashed #9C27B0; height: 0;"></span>
         <span>Normal Predictions (ML)</span>
       </div>
@@ -180,6 +184,7 @@
     let predictedData = [];
     let predictionHistory = []; // Store all past predictions with their timestamps
     let futureActualsData = []; // Store actual future data (for single-shot mode)
+    let smoothedHistoricalData = [];
 
     function showStatus(message, type = 'info') {
       const status = document.getElementById('status');
@@ -293,15 +298,16 @@
             single_shot: result.single_shot,
             future_actuals: result.future_actuals?.length || 0
           });
-          return {
-            predictions: result.predictions || [],
-            backoff: result.backoff || false,
-            actual: result.actual || historicalValues[historicalValues.length - 1] || 0,
-            metadata: result.metadata || {},
-            future_actuals: result.future_actuals || [],  // NEW: future actual data
-            single_shot: result.single_shot || false,  // NEW: single-shot mode flag
-            mean_error: result.mean_error  // NEW: overall error
-          };
+              return {
+                predictions: result.predictions || [],
+                backoff: result.backoff || false,
+                actual: result.actual || historicalValues[historicalValues.length - 1] || 0,
+                metadata: result.metadata || {},
+                future_actuals: result.future_actuals || [],  // NEW: future actual data
+                single_shot: result.single_shot || false,  // NEW: single-shot mode flag
+                mean_error: result.mean_error,  // NEW: overall error
+                smoothed_historical: result.smoothed_historical || [] // NEW: pass through smoothed history
+              };
         }
       } catch (err) {
         // If the ML server is unavailable or slow, do NOT emit artificial/fallback predictions.
@@ -341,6 +347,32 @@
           ...d,
           backoff: mlData.backoff
         }));
+
+        // Load smoothed historical if provided by backend
+        if (mlData.smoothed_historical && mlData.smoothed_historical.length > 0) {
+          smoothedHistoricalData = mlData.smoothed_historical.map(row => {
+            let ts = row.timestamp;
+            if (!ts.endsWith('Z') && !ts.includes('+') && !ts.includes('-', 10)) {
+              ts = ts + 'Z';
+            }
+            return { timestamp: Date.parse(ts), value: row.value };
+          });
+          console.log('[DEBUG] Loaded smoothed historical points:', smoothedHistoricalData.length);
+          // Debug: compare timestamps overlap with historical_data
+          try {
+            const histTs = historicalData.map(d => Math.floor(d.timestamp/1000));
+            const smoothTs = smoothedHistoricalData.map(d => Math.floor(d.timestamp/1000));
+            const histSet = new Set(histTs);
+            const overlap = smoothTs.filter(t => histSet.has(t)).length;
+            console.log('[DEBUG] Smoothed vs historical timestamp overlap (seconds-granularity):', overlap, '/', smoothTs.length);
+            console.log('[DEBUG] Sample historical timestamps:', histTs.slice(0,5).map(t => new Date(t*1000).toISOString()));
+            console.log('[DEBUG] Sample smoothed timestamps:', smoothTs.slice(0,5).map(t => new Date(t*1000).toISOString()));
+          } catch (e) {
+            console.log('[DEBUG] Timestamp overlap check failed:', e);
+          }
+        } else {
+          smoothedHistoricalData = [];
+        }
 
         // Use supplied prediction timestamps directly if present (from backend)
         if (mlData.predictions.length > 0 && typeof mlData.predictions[0] === 'object' && 'timestamp' in mlData.predictions[0]) {
@@ -529,8 +561,13 @@
       const histMap = new Map();
       historicalData.forEach(d => histMap.set(normalize(d.timestamp), d.value));
 
+      // Build a map for smoothed historical series (if present)
+      const smoothedHistMap = new Map();
+      smoothedHistoricalData.forEach(d => smoothedHistMap.set(normalize(d.timestamp), d.value));
+
       // For chart we need arrays matching fullTimestamps length. For historical part, fill values; for future, use nulls.
       const fullHistoricalValues = fullTimestamps.map(ts => histMap.has(ts) ? histMap.get(ts) : null);
+      const fullSmoothedHistoricalValues = fullTimestamps.map(ts => smoothedHistMap.has(ts) ? smoothedHistMap.get(ts) : null);
       
   // Build quick lookup maps for past predictions and future predictedData (normalized)
   const pastPredMap = new Map();
@@ -615,6 +652,18 @@
                 borderWidth: 2,
                 pointRadius: 0,
                 tension: 0.1
+              },
+              {
+                label: 'Smoothed History',
+                data: fullSmoothedHistoricalValues,
+                borderColor: '#2196F3',
+                backgroundColor: 'rgba(33, 150, 243, 0.05)',
+                borderWidth: 3,
+                borderDash: [6,4],
+                pointRadius: 0,
+                tension: 0.1,
+                order: 11,
+                fill: false
               },
               // Prediction envelope min (invisible baseline for fill)
               {
@@ -735,7 +784,17 @@
         // and made prediction lines appear stepped or drop spikes.
         chart.data.datasets[0].data = fullHistoricalValues;
         // Update all datasets (ensure they exist)
-        if (chart.data.datasets.length >= 6) {
+        if (chart.data.datasets.length >= 7) {
+          // [0]=Actual, [1]=Smoothed, [2]=Pred Range Min, [3]=Pred Range Max,
+          // [4]=Predictions, [5]=Suppressed, [6]=Future Actuals
+          chart.data.datasets[1].data = fullSmoothedHistoricalValues;
+          chart.data.datasets[2].data = predictionMin;
+          chart.data.datasets[3].data = predictionMax;
+          chart.data.datasets[4].data = normalPredictions;
+          chart.data.datasets[5].data = suppressedPredictions;
+          chart.data.datasets[6].data = futureActuals;
+        } else if (chart.data.datasets.length === 6) {
+          // Older layout without separate smoothed dataset
           chart.data.datasets[1].data = predictionMin;
           chart.data.datasets[2].data = predictionMax;
           chart.data.datasets[3].data = normalPredictions;

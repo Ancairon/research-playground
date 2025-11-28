@@ -32,7 +32,7 @@ from shared_prediction import single_shot_evaluation
 class LSTMAttentionTuner:
     """Hyperparameter tuner for LSTM with Attention models."""
     
-    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None, max_train_loss=None, extra_train_provided=False, max_time_per_config=None):
+    def __init__(self, csv_file, horizon, train_window, inference_window, max_lookback=None, max_training=None, extra_train=None, max_train_loss=None, extra_train_provided=False, max_time_per_config=None, smoothing_method=None, smoothing_window=3, smoothing_alpha=0.2):
         """
         Initialize tuner.
         
@@ -61,6 +61,10 @@ class LSTMAttentionTuner:
         self.max_train_loss = max_train_loss
         # Maximum time (seconds) allowed per configuration evaluation
         self.max_time_per_config = max_time_per_config
+        # Smoothing options forwarded to UniversalForecaster instances created by the tuner
+        self.smoothing_method = smoothing_method
+        self.smoothing_window = smoothing_window
+        self.smoothing_alpha = smoothing_alpha
         # Track training times for estimation
         self._training_times = []
         
@@ -437,7 +441,10 @@ class LSTMAttentionTuner:
                 max_train_loss=self.max_train_loss,
                 # Allow UniversalForecaster (and underlying train helper) to enforce
                 # a maximum per-config training time when provided by the tuner.
-                max_train_seconds=self.max_time_per_config
+                max_train_seconds=self.max_time_per_config,
+                smoothing_method=self.smoothing_method,
+                smoothing_window=self.smoothing_window,
+                smoothing_alpha=self.smoothing_alpha
             )
             
             # Use shared single-shot evaluation logic
@@ -545,7 +552,10 @@ class LSTMAttentionTuner:
             window=lookback,
             train_window=train_window,
             max_train_loss=self.max_train_loss,
-            max_train_seconds=self.max_time_per_config
+            max_train_seconds=self.max_time_per_config,
+            smoothing_method=self.smoothing_method,
+            smoothing_window=self.smoothing_window,
+            smoothing_alpha=self.smoothing_alpha
         )
 
         if verbose:
@@ -890,6 +900,13 @@ Note:
                         help='Optional max_train_loss to abort training early for poor configs')
     parser.add_argument('--max-time', type=int, default=120,
                         help='Maximum seconds per config before skipping (default: 120s). Set to 0 to disable.')
+    parser.add_argument('--smoothing-method', type=str, default=None,
+                        choices=[None, 'moving_average', 'ma', 'ewma', 'exponential'],
+                        help='Optional data smoothing method applied to training/actuals (None=disabled)')
+    parser.add_argument('--smoothing-window', type=int, default=3,
+                        help='Window size for moving-average smoothing (integer)')
+    parser.add_argument('--smoothing-alpha', type=float, default=0.2,
+                        help='Alpha for exponential smoothing (0-1)')
     parser.add_argument('--run-forecaster', action='store_true',
                         help='After tuning, invoke forecasting/forecast_main.py with the best config (runs in foreground).')
     
@@ -950,6 +967,13 @@ Note:
             args.window = original_config['window']
         if 'max-lookback' in original_config and args.max_lookback is None and not _cli_provided('max-lookback'):
             args.max_lookback = original_config['max-lookback']
+        # Support smoothing options in config (if not provided on CLI)
+        if ('smoothing-method' in original_config or 'smoothing_method' in original_config) and not _cli_provided('smoothing-method') and not _cli_provided('smoothing_method'):
+            args.smoothing_method = original_config.get('smoothing-method', original_config.get('smoothing_method'))
+        if ('smoothing-window' in original_config or 'smoothing_window' in original_config) and not _cli_provided('smoothing-window') and not _cli_provided('smoothing_window'):
+            args.smoothing_window = original_config.get('smoothing-window', original_config.get('smoothing_window'))
+        if ('smoothing-alpha' in original_config or 'smoothing_alpha' in original_config) and not _cli_provided('smoothing-alpha') and not _cli_provided('smoothing_alpha'):
+            args.smoothing_alpha = original_config.get('smoothing-alpha', original_config.get('smoothing_alpha'))
         
         # Report preserved parameters
         # Note: 'use-differencing' is intentionally NOT preserved here so it
@@ -1034,7 +1058,10 @@ Note:
         max_training=args.max_training,
         extra_train=args.extra_train,
         max_train_loss=args.max_train_loss,
-        max_time_per_config=args.max_time if args.max_time > 0 else None
+        max_time_per_config=args.max_time if args.max_time > 0 else None,
+        smoothing_method=args.smoothing_method,
+        smoothing_window=args.smoothing_window,
+        smoothing_alpha=args.smoothing_alpha
     )
     # Reserve final holdout from tuning (absolute points)
     tuner.holdout_horizon = int(args.holdout_horizon or 0)
@@ -1258,11 +1285,18 @@ Note:
                 best_config[yaml_key] = val
             
             # Preserve original config parameters that weren't tuned
-            preserve_keys = ['scaler-type', 'bias-correction', 'use-differencing', 'prediction-smoothing']
+            preserve_keys = ['scaler-type', 'bias-correction', 'use-differencing', 'prediction-smoothing',
+                             'smoothing-method', 'smoothing-window', 'smoothing-alpha']
             if hasattr(tuner, 'original_config'):
                 for key in preserve_keys:
+                    # Preserve parameter from original config.
+                    # Accept both hyphenated and underscored variants in the original file.
                     if key in tuner.original_config and key not in best_config:
                         best_config[key] = tuner.original_config[key]
+                    else:
+                        alt = key.replace('-', '_')
+                        if alt in tuner.original_config and key not in best_config:
+                            best_config[key] = tuner.original_config[alt]
             
             # Do not add server port to best config (not needed)
 

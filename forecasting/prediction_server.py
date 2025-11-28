@@ -54,6 +54,7 @@ def receive_predictions():
             'actual': data.get('actual', 0),
             'csv_mode': data.get('csv_mode', False),
             'historical_data': data.get('historical_data'),
+            'smoothed_historical': data.get('smoothed_historical'),
             'future_actuals': data.get('future_actuals'),  # NEW: actual future data for single-shot
             'single_shot': data.get('single_shot', False),  # NEW: single-shot mode flag
             'mean_error': data.get('mean_error'),  # NEW: overall error for single-shot
@@ -93,6 +94,7 @@ def get_predictions():
             'actual': latest_predictions.get('actual', 0),
             'csv_mode': latest_predictions.get('csv_mode', False),
             'historical_data': latest_predictions.get('historical_data'),
+            'smoothed_historical': latest_predictions.get('smoothed_historical'),
             'future_actuals': latest_predictions.get('future_actuals'),  # NEW
             'single_shot': latest_predictions.get('single_shot', False),  # NEW
             'mean_error': latest_predictions.get('mean_error'),  # NEW

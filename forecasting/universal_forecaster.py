@@ -25,6 +25,7 @@ from typing import Optional, List, Dict
 
 from models.base_model import BaseTimeSeriesModel
 from train_utils import train_model
+from smoothing import apply_smoothing
 
 
 def compute_threshold_from_errors(
@@ -85,6 +86,9 @@ class UniversalForecaster:
         window: int = 30,
         train_window: int = 300,
         prediction_smoothing: int = 3,
+        smoothing_method: Optional[str] = None,
+        smoothing_window: int = 3,
+        smoothing_alpha: float = 0.2,
         dynamic_retrain: bool = True,
         retrain_scale: float = 3.0,
         retrain_min: float = 50.0,
@@ -157,6 +161,11 @@ class UniversalForecaster:
         self.max_train_seconds = max_train_seconds
         # Callable to fetch historical training data: history_fetcher(seconds_back) -> pd.Series
         self.history_fetcher = history_fetcher
+        # Smoothing options: when provided, training series will be smoothed
+        # before being passed to the model. `method` can be 'moving_average' or 'ewma'.
+        self.smoothing_method = smoothing_method
+        self.smoothing_window = smoothing_window
+        self.smoothing_alpha = smoothing_alpha
         # Aggregation method for multiple predictions per target timestamp.
         # Options: 'mean' (default), 'median', 'last' (most recent), 'weighted' (recency-weighted)
         self.aggregation_method = 'mean'
@@ -230,13 +239,29 @@ class UniversalForecaster:
         Returns:
             Training time in seconds
         """
+        # Optionally smooth training data before passing to the centralized
+        # training helper. This ensures the model is trained on smoothed
+        # inputs when smoothing is configured on the forecaster.
+        try:
+            if getattr(self, 'smoothing_method', None):
+                data_for_training = apply_smoothing(
+                    data,
+                    method=self.smoothing_method,
+                    window=self.smoothing_window,
+                    alpha=self.smoothing_alpha,
+                )
+            else:
+                data_for_training = data
+        except Exception:
+            data_for_training = data
+
         # Use centralized training helper for consistent behavior across callers
         # Pass max_train_seconds through to the centralized train helper which
         # forwards it to the model implementation. This allows models with
         # long-running epoch loops to abort when the tuner requests a time limit.
         res = train_model(
             self.model,
-            data,
+            data_for_training,
             quiet=True,
             max_train_loss=self.max_train_loss,
             max_train_seconds=self.max_train_seconds
@@ -246,11 +271,18 @@ class UniversalForecaster:
 
         # Calculate baseline statistics from training data (from helper)
         try:
-            self.baseline_mean = float(res.get('baseline_mean', float(data.mean())))
-            self.baseline_std = float(res.get('baseline_std', float(data.std())))
+            # Use stats computed by training helper if available; otherwise
+            # derive from the data that was actually used for training (this
+            # will be the smoothed series when smoothing is enabled).
+            self.baseline_mean = float(res.get('baseline_mean', float(getattr(data_for_training, 'mean', lambda: float(data.mean()))())))
+            self.baseline_std = float(res.get('baseline_std', float(getattr(data_for_training, 'std', lambda: float(data.std()))())))
         except Exception:
-            self.baseline_mean = float(data.mean())
-            self.baseline_std = float(data.std())
+            try:
+                self.baseline_mean = float(data_for_training.mean())
+                self.baseline_std = float(data_for_training.std())
+            except Exception:
+                self.baseline_mean = float(data.mean())
+                self.baseline_std = float(data.std())
 
         if not self.quiet:
             print(f"[{self.model.get_model_name()}] Init train t={train_time:.3f}s")
@@ -288,7 +320,13 @@ class UniversalForecaster:
                 if isinstance(ser, pd.Series):
                     # If it's shorter than requested, fall back to live_data
                     if len(ser) >= int(self.train_window):
-                        return ser.sort_index()
+                        try:
+                            if getattr(self, 'smoothing_method', None):
+                                return apply_smoothing(ser.sort_index(), method=self.smoothing_method, window=self.smoothing_window, alpha=self.smoothing_alpha)
+                            else:
+                                return ser.sort_index()
+                        except Exception:
+                            return ser.sort_index()
                     else:
                         # fall through to fallback
                         pass
@@ -300,9 +338,16 @@ class UniversalForecaster:
         try:
             # If live_data is longer than train_window, take the tail
             if len(live_data) >= int(self.train_window):
-                return live_data.tail(int(self.train_window)).sort_index()
+                ser = live_data.tail(int(self.train_window)).sort_index()
             else:
-                return live_data.sort_index()
+                ser = live_data.sort_index()
+            try:
+                if getattr(self, 'smoothing_method', None):
+                    return apply_smoothing(ser, method=self.smoothing_method, window=self.smoothing_window, alpha=self.smoothing_alpha)
+                else:
+                    return ser
+            except Exception:
+                return ser
         except Exception:
             # As a last resort, return live_data as-is
             return live_data
@@ -317,12 +362,22 @@ class UniversalForecaster:
         Returns:
             Smoothed predictions (list of floats)
         """
+        # Prepare smoothed input for model updates/prediction (leave `live_data` unchanged for UI)
+        try:
+            if getattr(self, 'smoothing_method', None):
+                smoothed_live = apply_smoothing(live_data.sort_index(), method=self.smoothing_method, window=self.smoothing_window, alpha=self.smoothing_alpha)
+            else:
+                smoothed_live = live_data
+        except Exception:
+            smoothed_live = live_data
+
         # If we're currently in a backoff window, suppress user-facing predictions
         if self._backoff_active:
             # Allow model update (online learning) but do not call predict or append pending validations
             if self.model.supports_online_learning():
                 try:
-                    self.model.update(live_data)
+                    # Update model with the smoothed view so internal state matches training preprocessing
+                    self.model.update(smoothed_live)
                 except Exception as e:
                     self._append_backoff_log(self.model.get_model_name(), "online_update_failed", f"err={e}")
             if not self.quiet and not self._backoff_announced:
@@ -377,9 +432,10 @@ class UniversalForecaster:
                 self.step += 1
                 return []
 
-        # Update model with new data (online learning if supported)
+        # Update model with new data (online learning if supported).
+        # Use the smoothed view so model inference sees the same preprocessing used during training.
         if self.model.supports_online_learning():
-            self.model.update(live_data)
+            self.model.update(smoothed_live)
         
         # Generate prediction
         start_inf = time.time()

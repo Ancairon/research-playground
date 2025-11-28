@@ -13,6 +13,7 @@ import time
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Any
+from smoothing import apply_smoothing
 
 
 def single_shot_evaluation(
@@ -110,10 +111,36 @@ def single_shot_evaluation(
     # Train the model
     if verbose:
         print(f"  Training with {len(train_data)} points...")
-        print(f"  First train value: {train_data.iloc[0]:.3f}, Last train value: {train_data.iloc[-1]:.3f}")
+        print(f"  First train value (raw): {train_data.iloc[0]:.3f}, Last train value (raw): {train_data.iloc[-1]:.3f}")
     
     start_time = time.time()
-    forecaster.train_initial(train_data)
+    # If forecaster is configured to smooth inputs, explicitly smooth the
+    # entire training series here so training happens on the smoothed data
+    # and logs/metrics reflect that preprocessing step.
+    try:
+        if getattr(forecaster, 'smoothing_method', None):
+            train_data_for_training = apply_smoothing(
+                train_data.sort_index(),
+                method=forecaster.smoothing_method,
+                window=getattr(forecaster, 'smoothing_window', 3),
+                alpha=getattr(forecaster, 'smoothing_alpha', 0.2),
+            )
+            # Ensure we pass a pandas Series with the same index
+            if isinstance(train_data_for_training, list):
+                train_data_for_training = pd.Series(train_data_for_training, index=train_data.index)
+        else:
+            train_data_for_training = train_data
+    except Exception:
+        train_data_for_training = train_data
+
+    if verbose and getattr(forecaster, 'smoothing_method', None):
+        try:
+            print(f"  Training ON SMOOTHED series using method={forecaster.smoothing_method} (window={getattr(forecaster, 'smoothing_window', None)}, alpha={getattr(forecaster, 'smoothing_alpha', None)})")
+            print(f"  First train value (smoothed): {train_data_for_training.iloc[0]:.3f}, Last train value (smoothed): {train_data_for_training.iloc[-1]:.3f}")
+        except Exception:
+            pass
+
+    forecaster.train_initial(train_data_for_training)
     train_time = time.time() - start_time
     
     if verbose:
@@ -155,6 +182,21 @@ def single_shot_evaluation(
         print(f"  First actual: {actuals[0]:.3f}, Last actual: {actuals[-1]:.3f}")
     
     # Calculate sMAPE (symmetric MAPE)
+    # If the forecaster indicates that actuals should be smoothed for
+    # evaluation (forecaster trained on smoothed inputs), smooth the actuals
+    # before computing MAPE so metrics compare smoothed actuals vs predictions.
+    actuals_orig = list(actuals)
+    try:
+        if getattr(forecaster, 'smoothing_method', None):
+            actuals = apply_smoothing(actuals_orig, method=forecaster.smoothing_method, window=getattr(forecaster, 'smoothing_window', 3), alpha=getattr(forecaster, 'smoothing_alpha', 0.2))
+            # apply_smoothing may return a Series or list
+            if isinstance(actuals, pd.Series):
+                actuals = list(actuals.astype(float).values)
+        else:
+            actuals = actuals_orig
+    except Exception:
+        actuals = actuals_orig
+
     errors = []
     for actual, pred in zip(actuals, predictions):
         err_abs = abs(actual - pred)
@@ -184,7 +226,8 @@ def single_shot_evaluation(
     
     return {
         'predictions': predictions,
-        'actuals': actuals,
+        'actuals': actuals_orig,
+        'smoothed_actuals': actuals,
         'train_time': train_time,
         'inference_time': inference_time,
         'mape': mape,
