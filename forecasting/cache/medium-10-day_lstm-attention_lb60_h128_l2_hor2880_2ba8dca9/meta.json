@@ -1,0 +1,27 @@
+{
+  "hash": "2ba8dca9bf11e9c1a76957eed20978eecd2600b233cfa42ee3cdb745304b4b14",
+  "readable_name": "medium-10-day_lstm-attention_lb60_h128_l2_hor2880",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "medium-10-day.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 128,
+    "horizon": 2880,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 3000,
+    "use_differencing": false,
+    "window": 120
+  }
+}

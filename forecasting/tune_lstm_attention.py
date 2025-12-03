@@ -29,6 +29,23 @@ from universal_forecaster import UniversalForecaster
 from shared_prediction import single_shot_evaluation
 
 
+def _format_smoothing_config(val):
+    """Format smoothing-config tuple for display."""
+    if val is None:
+        return "None"
+    if isinstance(val, (list, tuple)) and len(val) == 3:
+        method, window, alpha = val
+        if method is None:
+            return "None (no smoothing)"
+        elif method in ('moving_average', 'ma'):
+            return f"moving_average(window={window})"
+        elif method in ('ewma', 'exponential'):
+            return f"ewma(alpha={alpha})"
+        else:
+            return str(val)
+    return str(val)
+
+
 class LSTMAttentionTuner:
     """Hyperparameter tuner for LSTM with Attention models."""
     
@@ -231,6 +248,28 @@ class LSTMAttentionTuner:
                 'batch_size': batch_sizes,  # Search batch sizes
                 'use-differencing': [False, True],  # Try both differencing modes
                 'scaler-type': ['none', 'standard', 'robust'],
+                # Smoothing configurations: each tuple is (method, window, alpha)
+                # - None: no smoothing
+                # - moving_average: uses window parameter (alpha ignored)
+                # - ewma: uses alpha parameter (window ignored)
+                'smoothing-config': [
+                    (None, None, None),  # No smoothing
+                    ('moving_average', 3, None),
+                    ('moving_average', 5, None),
+                    ('moving_average', 10, None),
+                    ('moving_average', 25, None),
+                    ('moving_average', 50, None),
+                    ('moving_average', 100, None),
+                    ('moving_average', 200, None),
+                    ('moving_average', 500, None),
+                    ('ewma', None, 0.05),
+                    ('ewma', None, 0.1),
+                    ('ewma', None, 0.2),
+                    ('ewma', None, 0.3),
+                    ('ewma', None, 0.5),
+                    ('ewma', None, 0.7),
+                    ('ewma', None, 0.9),
+                ],
             }
             # Include extra-train in the search space when it's not fixed by CLI
             if self.extra_train_provided:
@@ -253,6 +292,12 @@ class LSTMAttentionTuner:
                 'batch_size': [128],  # Quick: just one batch size
                 'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],
+                # Quick: test just a few smoothing options
+                'smoothing-config': [
+                    (None, None, None),  # No smoothing
+                    ('moving_average', 5, None),
+                    ('ewma', None, 0.2),
+                ],
             }
             if self.extra_train_provided:
                 search_space['extra-train'] = [self.extra_train]
@@ -286,6 +331,15 @@ class LSTMAttentionTuner:
                 'batch_size': [64, 128],  # Balanced: test 2 batch sizes
                 'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],
+                # Balanced: test moderate range of smoothing options
+                'smoothing-config': [
+                    (None, None, None),  # No smoothing
+                    ('moving_average', 5, None),
+                    ('moving_average', 10, None),
+                    ('moving_average', 50, None),
+                    ('ewma', None, 0.2),
+                    ('ewma', None, 0.3),
+                ],
             }
             if self.extra_train_provided:
                 search_space['extra-train'] = [self.extra_train]
@@ -318,6 +372,28 @@ class LSTMAttentionTuner:
                 'batch_size': [32, 64, 128, 256],  # Exhaustive: search all common batch sizes
                 'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],
+                # Exhaustive: test full range of smoothing options
+                'smoothing-config': [
+                    (None, None, None),  # No smoothing
+                    ('moving_average', 3, None),
+                    ('moving_average', 5, None),
+                    ('moving_average', 10, None),
+                    ('moving_average', 20, None),
+                    ('moving_average', 50, None),
+                    ('moving_average', 100, None),
+                    ('moving_average', 200, None),
+                    ('moving_average', 500, None),
+                    ('moving_average', 1000, None),
+                    ('ewma', None, 0.01),
+                    ('ewma', None, 0.05),
+                    ('ewma', None, 0.1),
+                    ('ewma', None, 0.2),
+                    ('ewma', None, 0.3),
+                    ('ewma', None, 0.5),
+                    ('ewma', None, 0.7),
+                    ('ewma', None, 0.9),
+                    ('ewma', None, 0.95),
+                ],
             }
             if self.extra_train_provided:
                 search_space['extra-train'] = [self.extra_train]
@@ -351,6 +427,21 @@ class LSTMAttentionTuner:
             
             # Get lookback from config (support 'window' as alias for backwards compatibility)
             lookback = config.get('lookback', config.get('window', 60))
+            
+            # Handle smoothing-config tuple: (method, window, alpha)
+            # This takes precedence over individual smoothing params for this evaluation
+            smoothing_method = self.smoothing_method
+            smoothing_window = self.smoothing_window
+            smoothing_alpha = self.smoothing_alpha
+            
+            if 'smoothing-config' in config:
+                sm_cfg = config['smoothing-config']
+                if sm_cfg is not None and isinstance(sm_cfg, (list, tuple)) and len(sm_cfg) == 3:
+                    smoothing_method = sm_cfg[0]
+                    if sm_cfg[1] is not None:
+                        smoothing_window = sm_cfg[1]
+                    if sm_cfg[2] is not None:
+                        smoothing_alpha = sm_cfg[2]
             
             # Determine extra_train: prefer config-specified 'extra-train' if present (from search space),
             # otherwise fall back to the tuner-level extra_train (CLI-provided), and finally to config train_window.
@@ -442,9 +533,9 @@ class LSTMAttentionTuner:
                 # Allow UniversalForecaster (and underlying train helper) to enforce
                 # a maximum per-config training time when provided by the tuner.
                 max_train_seconds=self.max_time_per_config,
-                smoothing_method=self.smoothing_method,
-                smoothing_window=self.smoothing_window,
-                smoothing_alpha=self.smoothing_alpha
+                smoothing_method=smoothing_method,
+                smoothing_window=smoothing_window,
+                smoothing_alpha=smoothing_alpha
             )
             
             # Use shared single-shot evaluation logic
@@ -651,7 +742,10 @@ class LSTMAttentionTuner:
 
             print(f"\n[{i}/{len(phase1_configs)}] Testing configuration:")
             for key, val in config.items():
-                print(f"  {key}: {val}")
+                if key == 'smoothing-config':
+                    print(f"  {key}: {_format_smoothing_config(val)}")
+                else:
+                    print(f"  {key}: {val}")
 
             result = self.evaluate_config(config, verbose=True)
 
@@ -696,7 +790,10 @@ class LSTMAttentionTuner:
                     best_config = results[idx]['config']
                     print(f"\nRefining config #{idx+1} (MAPE: {results[idx]['mape']:.2f}%):")
                     for key, val in best_config.items():
-                        print(f"  {key}: {val}")
+                        if key == 'smoothing-config':
+                            print(f"  {key}: {_format_smoothing_config(val)}")
+                        else:
+                            print(f"  {key}: {val}")
                     
                     # Generate refinements around this config
                     refinements = self._generate_refinements(best_config, search_space)
@@ -712,7 +809,10 @@ class LSTMAttentionTuner:
                 for i, config in enumerate(new_refinements, 1):
                     print(f"\n[Refinement {i}/{len(new_refinements)}]:")
                     for key, val in config.items():
-                        print(f"  {key}: {val}")
+                        if key == 'smoothing-config':
+                            print(f"  {key}: {_format_smoothing_config(val)}")
+                        else:
+                            print(f"  {key}: {val}")
                     
                     result = self.evaluate_config(config, verbose=True)
                     results.append(result)
@@ -846,7 +946,10 @@ class LSTMAttentionTuner:
             print(f"   Config:")
             for key, val in result['config'].items():
                 if key != '_original':  # Don't print the marker in config
-                    print(f"     {key}: {val}")
+                    if key == 'smoothing-config':
+                        print(f"     {key}: {_format_smoothing_config(val)}")
+                    else:
+                        print(f"     {key}: {val}")
             print(f"   Metrics:")
             print(f"     RMSE: {result['rmse']:.2f}")
             print(f"     MBE: {result['mbe']:.2f}")
@@ -1078,13 +1181,20 @@ Note:
         possible_keys = [
             'lookback', 'window', 'hidden-size', 'hidden_size', 'num-layers', 'num_layers',
             'dropout', 'learning-rate', 'learning_rate', 'epochs', 'batch-size', 'batch_size',
-            'use-differencing', 'use_differencing', 'learning-rate'
+            'use-differencing', 'use_differencing', 'scaler-type', 'scaler_type'
         ]
         original_eval_config = {}
         for key in possible_keys:
             if key in original_config:
                 # Keep original key naming (evaluate_config handles hyphens)
                 original_eval_config[key] = original_config[key]
+        
+        # Build smoothing-config tuple from original config's smoothing params
+        # This ensures the original config is comparable to tuned configs
+        orig_sm_method = original_config.get('smoothing-method', original_config.get('smoothing_method', None))
+        orig_sm_window = original_config.get('smoothing-window', original_config.get('smoothing_window', None))
+        orig_sm_alpha = original_config.get('smoothing-alpha', original_config.get('smoothing_alpha', None))
+        original_eval_config['smoothing-config'] = (orig_sm_method, orig_sm_window, orig_sm_alpha)
 
         # Check if we have the minimum required parameters for a valid baseline
         # These must be ACTUALLY present in config, not inferred
@@ -1186,8 +1296,9 @@ Note:
             best = r
             break
     if best is not None:
-        best_mape = best['mape']
+        tuning_mape = best['mape']  # MAPE from tuning phase (on tuning data)
         is_best_original = best['config'].get('_original', False)
+        
         # Always run final held-out evaluation (if user reserved a holdout),
         # even if we will not overwrite the config file. This gives an honest
         # final metric for the reserved data.
@@ -1196,6 +1307,17 @@ Note:
         except Exception as e:
             print(f"Warning: held-out evaluation failed: {e}")
             holdout_result = None
+        
+        # Use held-out MAPE for comparison if available, otherwise fall back to tuning MAPE
+        # This ensures we compare apples-to-apples (held-out vs held-out)
+        if holdout_result and 'mape' in holdout_result and not holdout_result.get('skipped'):
+            best_mape = holdout_result['mape']
+            using_holdout = True
+            print(f"\n[Comparison] Using held-out MAPE for override decision: {best_mape:.2f}%")
+        else:
+            best_mape = tuning_mape
+            using_holdout = False
+            print(f"\n[Comparison] Using tuning MAPE for override decision: {best_mape:.2f}% (no holdout available)")
         
         # Check if we should save. By default we only save if the tuned config
         # improves over the original. The CLI flag --force-overwrite can be
@@ -1210,7 +1332,7 @@ Note:
             should_save = False
             print(f"\n{'='*70}")
             print(f"✓ Original config is ALREADY OPTIMAL!")
-            print(f"   Original MAPE: {best_mape:.2f}%")
+            print(f"   Original MAPE: {best_mape:.2f}%{' (held-out)' if using_holdout else ''}")
             print(f"   No tuned config beat the original")
             print(f"   Config file will NOT be overwritten")
             print(f"{'='*70}\n")
@@ -1219,22 +1341,22 @@ Note:
             should_save = False
             print(f"\n{'='*70}")
             print(f"⚠️  Tuning did NOT improve over original config")
-            print(f"   Original MAPE: {original_mape:.2f}%")
-            print(f"   Best new MAPE: {best_mape:.2f}%")
+            print(f"   Original MAPE: {original_mape:.2f}% (held-out)")
+            print(f"   Best new MAPE: {best_mape:.2f}%{' (held-out)' if using_holdout else ''}")
             print(f"   Config file will NOT be overwritten")
             print(f"{'='*70}\n")
         elif original_mape is not None and best_mape >= original_mape and force:
             print(f"\n{'='*70}")
             print(f"⚠️  Tuning did NOT improve, but --force-overwrite will write the best config")
-            print(f"   Original MAPE: {original_mape:.2f}%")
-            print(f"   Best new MAPE: {best_mape:.2f}%")
+            print(f"   Original MAPE: {original_mape:.2f}% (held-out)")
+            print(f"   Best new MAPE: {best_mape:.2f}%{' (held-out)' if using_holdout else ''}")
             print(f"{'='*70}\n")
         else:
             print(f"\n{'='*70}")
             print(f"✅ Tuning IMPROVED over original config!")
             if original_mape is not None:
-                print(f"   Original MAPE: {original_mape:.2f}%")
-            print(f"   Best new MAPE: {best_mape:.2f}%")
+                print(f"   Original MAPE: {original_mape:.2f}% (held-out)")
+            print(f"   Best new MAPE: {best_mape:.2f}%{' (held-out)' if using_holdout else ''}")
             if original_mape is not None:
                 print(f"   Improvement: {original_mape - best_mape:.2f}% reduction")
             print(f"   Config file will be updated")
@@ -1280,13 +1402,24 @@ Note:
                 # Skip internal markers
                 if key == '_original':
                     continue
+                # Handle smoothing-config tuple: extract to individual keys
+                if key == 'smoothing-config':
+                    if val is not None and isinstance(val, (list, tuple)) and len(val) == 3:
+                        sm_method, sm_window, sm_alpha = val
+                        if sm_method is not None:
+                            best_config['smoothing-method'] = sm_method
+                            if sm_method in ('moving_average', 'ma') and sm_window is not None:
+                                best_config['smoothing-window'] = sm_window
+                            elif sm_method in ('ewma', 'exponential') and sm_alpha is not None:
+                                best_config['smoothing-alpha'] = sm_alpha
+                    continue  # Don't add the tuple itself
                 # Convert underscores to hyphens for YAML consistency
                 yaml_key = key.replace('_', '-')
                 best_config[yaml_key] = val
             
             # Preserve original config parameters that weren't tuned
-            preserve_keys = ['scaler-type', 'bias-correction', 'use-differencing', 'prediction-smoothing',
-                             'smoothing-method', 'smoothing-window', 'smoothing-alpha']
+            # Note: smoothing params are now tuned via smoothing-config, so they come from the search, not preserved
+            preserve_keys = ['scaler-type', 'bias-correction', 'use-differencing', 'prediction-smoothing']
             if hasattr(tuner, 'original_config'):
                 for key in preserve_keys:
                     # Preserve parameter from original config.
@@ -1332,7 +1465,10 @@ Note:
         print(f"Train Time: {best['train_time']:.1f}s")
         print("\nParameters:")
         for key, val in best['config'].items():
-            print(f"  {key}: {val}")
+            if key == 'smoothing-config':
+                print(f"  {key}: {_format_smoothing_config(val)}")
+            else:
+                print(f"  {key}: {val}")
         print()
         # Print held-out evaluation summary if available
         if 'holdout_result' in locals() and holdout_result is not None:
@@ -1361,22 +1497,17 @@ Note:
 
         # Optionally run the forecaster with the best config
         if args.run_forecaster:
-            # Prepare config path: use saved file if it exists, otherwise write a temp file
+            # Prepare config path: use saved file if it exists, otherwise use original config
             cfg_to_run = None
             if should_save and best_config_file and os.path.exists(best_config_file):
                 cfg_to_run = os.path.abspath(best_config_file)
+            elif args.config and os.path.exists(args.config):
+                # Original config was best - use it directly
+                cfg_to_run = os.path.abspath(args.config)
+                print(f"Using original config (no improvement found): {cfg_to_run}")
             else:
-                # Write best_config dict to a temporary YAML file for immediate use
-                try:
-                    tmp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml')
-                    config_to_write = {k: v for k, v in best_config.items() if not k.startswith('#')}
-                    yaml.dump(config_to_write, tmp, default_flow_style=False, sort_keys=False)
-                    tmp.close()
-                    cfg_to_run = tmp.name
-                    print(f"Running forecaster with temporary config: {cfg_to_run}")
-                except Exception as e:
-                    print(f"Failed to write temp config for forecaster: {e}")
-                    cfg_to_run = None
+                print("No config file available to run forecaster with.")
+                cfg_to_run = None
 
             if cfg_to_run:
                 forecaster_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'forecast_main.py')

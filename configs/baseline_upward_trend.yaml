@@ -1,10 +1,10 @@
 # LSTM-Attention Best Configuration
-# MAPE: 1.33%
-# RMSE: 0.14
-# Train Time: 1.2s
+# MAPE: 0.38%
+# RMSE: 0.04
+# Train Time: 2.8s
 
-# HELDOUT_MAPE: 1.33%
-# HELDOUT_RMSE: 0.14
+# HELDOUT_MAPE: 0.38%
+# HELDOUT_RMSE: 0.04
 
 model: lstm-attention
 single-shot: true

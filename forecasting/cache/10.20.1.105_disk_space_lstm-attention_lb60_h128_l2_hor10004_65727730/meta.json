@@ -1,0 +1,27 @@
+{
+  "hash": "6572773091648007a27ee0da8cacd6b515b15c687f1549c22f794df105a3831e",
+  "readable_name": "10.20.1.105_disk_space_lstm-attention_lb60_h128_l2_hor10004",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "10.20.1.105_disk_space.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 128,
+    "horizon": 10004,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "none",
+    "train_window": 10124,
+    "use_differencing": true,
+    "window": 120
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "hash": "fb730ffd357223e3a623fe7a85c6ce5350018d8c1dc2245877e7976599e374dc",
+  "readable_name": "gaussian_lstm-attention_lb60_h64_l2_hor720",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "gaussian.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 64,
+    "horizon": 720,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "robust",
+    "train_window": 810,
+    "use_differencing": false,
+    "window": 90
+  }
+}

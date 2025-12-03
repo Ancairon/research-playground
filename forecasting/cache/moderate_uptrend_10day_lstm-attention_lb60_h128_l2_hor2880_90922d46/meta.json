@@ -1,0 +1,27 @@
+{
+  "hash": "90922d46f43d30487a8a95ba1361467ec4e3b4afc2e7dc8f4a1938317f19669b",
+  "readable_name": "moderate_uptrend_10day_lstm-attention_lb60_h128_l2_hor2880",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "moderate_uptrend_10day.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 128,
+    "horizon": 2880,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 2940,
+    "use_differencing": true,
+    "window": 60
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "hash": "cd4ebeb3d9e9b1aa785e3bb9ca6fdc5ffede29f0c02d8c7da5e5dd0f2c17120a",
+  "readable_name": "seasonal_lstm-attention_lb60_h64_l2_hor720",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "seasonal.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 64,
+    "horizon": 720,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 780,
+    "use_differencing": false,
+    "window": 60
+  }
+}

@@ -2,29 +2,66 @@ from matplotlib.font_manager import json_dump
 import pandas as pd
 import requests
 import os
+from dotenv import load_dotenv
 
 
-def getDataFromAPI(ip, context, dimension, points, out_file: str | None = None, smooth_window: int | None = None):
+def getDataFromAPI(ip, context, dimension, points, out_file: str | None = None, smooth_window: int | None = None, bearer_token: str | None = None, use_https: bool = False):
     """
     Fetches raw JSON from Netdata API v3 using contexts and dimensions parameters,
     and returns a DataFrame with a datetime index and a 'value' column.
     
     Args:
         smooth_window: If provided, applies rolling average smoothing with this window size
+        bearer_token: If provided, adds Authorization header with Bearer token
+        use_https: If True, use https:// instead of http://
     """
+    protocol = "https" if use_https else "http"
+    port = "" if use_https else ":19999"
     url = (
-                f"http://{ip}:19999/api/v3/data?"
+                f"{protocol}://{ip}{port}/api/v3/data?"
                 f"contexts={context}&"
                 f"dimensions={dimension}&"
-                f"after=-{60*60*24*7*4*10}&before=0&"
+                f"after=-{60*60*24*7*4*11}&before=0&"
                 f"points={points}&"
                 f"options=seconds,jsonwrap&"
                 f"format=json2"
     )
-    r = requests.get(url, timeout=30)
+    print(url)
+    
+    headers = {}
+    if bearer_token:
+        headers['X-Netdata-auth'] = f'Bearer {bearer_token}'
+        # Mask token for security in debug output
+        masked_token = bearer_token[:4] + '...' + bearer_token[-4:] if len(bearer_token) > 8 else '***'
+        print(f"Using Bearer token authentication (token: {masked_token}, length: {len(bearer_token)})")
+    
+    try:
+        
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()  # Raise exception for 4xx/5xx status codes
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error: {e}")
+        print(f"Status Code: {r.status_code}")
+        print(f"Response: {r.text[:500]}")  # Print first 500 chars of response
+        raise
+    except requests.exceptions.ConnectionError as e:
+        print(f"Connection Error: {e}")
+        raise
+    except requests.exceptions.Timeout as e:
+        print(f"Timeout Error: {e}")
+        raise
+    except requests.exceptions.RequestException as e:
+        print(f"Request Error: {e}")
+        raise
 
-    labels = r.json()['result']['labels']
-    data = r.json()['result']['data']
+    try:
+        json_response = r.json()
+        labels = json_response['result']['labels']
+        data = json_response['result']['data']
+    except (KeyError, ValueError) as e:
+        print(f"Error parsing JSON response: {e}")
+        print(f"Response content: {r.text[:500]}")
+        raise
 
     print(labels)
 
@@ -72,6 +109,10 @@ def getDataFromAPI(ip, context, dimension, points, out_file: str | None = None, 
 
 def main(argv=None):
     import argparse
+    
+    # Load .env file for bearer token
+    load_dotenv()
+    
     p = argparse.ArgumentParser(description='Fetch Netdata context/dimension into CSV')
     p.add_argument('--ip', default='192.168.1.27', help='Netdata server IP/host')
     p.add_argument('--context', default='system.cpu', help='Netdata context/chart id')
@@ -79,8 +120,22 @@ def main(argv=None):
     p.add_argument('--points', type=int, default=5000, help='points of history to fetch')
     p.add_argument('--out', default=None, help='Output CSV path')
     p.add_argument('--smooth', type=int, default=None, help='Apply rolling average smoothing with this window size')
+    p.add_argument('--authentication-bearer', action='store_true', 
+                   help='Use Bearer token authentication from BEARER_TOKEN in .env file')
+    p.add_argument('--https', action='store_true',
+                   help='Use HTTPS instead of HTTP (no port suffix)')
     args = p.parse_args(argv)
-    return getDataFromAPI(args.ip, args.context, args.dimension, args.points, out_file=args.out, smooth_window=args.smooth)
+    
+    # Get bearer token from .env if --authentication-bearer is used
+    bearer_token = None
+    if args.authentication_bearer:
+        bearer_token = os.environ.get('BEARER_TOKEN')
+        if not bearer_token:
+            print("Warning: --authentication-bearer specified but BEARER_TOKEN not found in .env file")
+    
+    return getDataFromAPI(args.ip, args.context, args.dimension, args.points, 
+                          out_file=args.out, smooth_window=args.smooth,
+                          bearer_token=bearer_token, use_https=args.https)
 
 
 if __name__ == '__main__':

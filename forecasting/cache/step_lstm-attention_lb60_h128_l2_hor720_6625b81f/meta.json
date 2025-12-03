@@ -1,0 +1,27 @@
+{
+  "hash": "6625b81fa3cc56b10a740b69b7a2bd88dc1c2a5298d75b3194dc20c77f0c03d5",
+  "readable_name": "step_lstm-attention_lb60_h128_l2_hor720",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "step.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 128,
+    "horizon": 720,
+    "ip": "localhost",
+    "learning_rate": 0.001,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "standard",
+    "train_window": 810,
+    "use_differencing": true,
+    "window": 90
+  }
+}
