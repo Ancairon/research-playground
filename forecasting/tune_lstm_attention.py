@@ -206,56 +206,63 @@ class LSTMAttentionTuner:
         search_space['extra-train'] = [0, 0.0005, 0.001]
         
         if search_type == 'auto':
-            # Adaptive auto-tuning: adjusts search space based on data size and horizon
-            # Generate adaptive lookback range
+            # Auto mode: SUPERSET of quick mode + adaptive exploration based on data
+            # This ensures auto always explores at least what quick would explore,
+            # plus additional options that may help for the specific dataset.
+            
+            # Start with quick's base lookbacks, then add adaptive ones
+            base_lookbacks = [60, 120]  # Quick's lookbacks - always included
+            
+            # Add adaptive lookbacks based on data size and horizon
             min_lookback = max(30, self.horizon // 5)  # At least 1/5 of horizon
             max_lookback_search = min(self.max_lookback, data_size // 3)
             
-            # Create 5 evenly spaced lookback values
-            if max_lookback_search > min_lookback * 3:
-                lookback_values = [
-                    min_lookback,
-                    min_lookback * 2,
-                    (min_lookback + max_lookback_search) // 2,
-                    int(max_lookback_search * 0.75),
-                    max_lookback_search
-                ]
-            else:
-                lookback_values = [min_lookback, (min_lookback + max_lookback_search) // 2, max_lookback_search]
+            # Add adaptive values if they differ from base
+            adaptive_lookbacks = [
+                min_lookback,
+                min_lookback * 2,
+                (min_lookback + max_lookback_search) // 2,
+                int(max_lookback_search * 0.75),
+                max_lookback_search
+            ]
             
-            lookback_values = filter_lookbacks(sorted(set(lookback_values)))
+            # Merge base (quick) + adaptive lookbacks
+            all_lookbacks = sorted(set(base_lookbacks + adaptive_lookbacks))
+            lookback_values = filter_lookbacks(all_lookbacks)
             
-            # Scale model complexity with data
-            if data_size < 2000:
-                hidden_sizes = [32]
-            elif data_size < 5000:
-                hidden_sizes = [32, 64]
-            else:
-                hidden_sizes = [32,64]
+            # Hidden sizes: include quick's [64, 128] + smaller/larger options based on data
+            hidden_sizes = [32, 64, 128]  # Always include 64, 128 from quick, plus 32
+            if data_size >= 5000:
+                hidden_sizes.append(256)  # Add larger for big datasets
             
-            num_layers = [2] if data_size < 5000 or self.horizon < 1000 else [2, 3]
+            # Num layers: quick uses [2], auto adds [3] for larger data/horizons
+            num_layers = [2, 3] if data_size >= 5000 or self.horizon >= 1000 else [2]
+            
             dropout_values = [config_dropout]  # Use config value
             epochs = [config_epochs]  # Use config value
-            batch_sizes = [128, 256]  # Search common batch sizes
+            
+            # Batch sizes: include quick's 128 + more options
+            batch_sizes = [64, 128, 256]
+            
+            # Learning rates: include quick's 0.001 + additional
+            learning_rates = [0.001, 0.0005]  # Quick uses 0.001
             
             search_space = {
                 'lookback': lookback_values,
                 'hidden_size': hidden_sizes,
                 'num_layers': num_layers,
                 'dropout': dropout_values,
-                'learning_rate': [0.001, 0.0005],  # Search both common values
+                'learning_rate': learning_rates,
                 'epochs': epochs,
-                'batch_size': batch_sizes,  # Search batch sizes
-                'use-differencing': [False, True],  # Try both differencing modes
-                'scaler-type': ['none', 'standard', 'robust'],
-                # Smoothing configurations: each tuple is (method, window, alpha)
-                # - None: no smoothing
-                # - moving_average: uses window parameter (alpha ignored)
-                # - ewma: uses alpha parameter (window ignored)
+                'batch_size': batch_sizes,
+                'use-differencing': [False, True],  # Same as quick
+                'scaler-type': ['none', 'standard', 'robust'],  # Same as quick
+                # Smoothing: include quick's options + more
+                # Quick has: None, MA(5), EWMA(0.2)
                 'smoothing-config': [
-                    (None, None, None),  # No smoothing
+                    (None, None, None),  # No smoothing (quick)
                     ('moving_average', 3, None),
-                    ('moving_average', 5, None),
+                    ('moving_average', 5, None),  # (quick)
                     ('moving_average', 10, None),
                     ('moving_average', 25, None),
                     ('moving_average', 50, None),
@@ -264,7 +271,7 @@ class LSTMAttentionTuner:
                     ('moving_average', 500, None),
                     ('ewma', None, 0.05),
                     ('ewma', None, 0.1),
-                    ('ewma', None, 0.2),
+                    ('ewma', None, 0.2),  # (quick)
                     ('ewma', None, 0.3),
                     ('ewma', None, 0.5),
                     ('ewma', None, 0.7),
@@ -1511,7 +1518,7 @@ Note:
 
             if cfg_to_run:
                 forecaster_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'forecast_main.py')
-                cmd = [sys.executable, forecaster_script, '--config', cfg_to_run]
+                cmd = [sys.executable, forecaster_script, '--config', cfg_to_run, '--ignore-cache']
                 print(f"Launching forecaster: {' '.join(cmd)}")
                 try:
                     subprocess.run(cmd)
