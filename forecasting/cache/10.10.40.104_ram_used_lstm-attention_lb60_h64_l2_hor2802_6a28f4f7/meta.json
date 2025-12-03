@@ -1,0 +1,27 @@
+{
+  "hash": "6a28f4f78e2ffcfa4b9758fdb9802ad60910101bcdce516330fa5bb6d02bdf77",
+  "readable_name": "10.10.40.104_ram_used_lstm-attention_lb60_h64_l2_hor2802",
+  "fingerprint": {
+    "aggregation_method": "weighted",
+    "aggregation_weight_tau": 1.0,
+    "batch_size": 128,
+    "bias_correction": true,
+    "context": "ip.tcppackets",
+    "csv_file": "10.10.40.104_ram_used.csv",
+    "dimension": "received",
+    "dropout": 0.2,
+    "epochs": 150,
+    "hidden_size": 64,
+    "horizon": 2802,
+    "ip": "localhost",
+    "learning_rate": 0.0005,
+    "lookback": 60,
+    "model": "lstm-attention",
+    "num_layers": 2,
+    "prediction_smoothing": 1,
+    "scaler_type": "robust",
+    "train_window": 2922,
+    "use_differencing": false,
+    "window": 120
+  }
+}

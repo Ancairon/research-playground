@@ -203,49 +203,46 @@ class LSTMAttentionTuner:
             return filtered
 
         search_space = {}
-        search_space['extra-train'] = [0, 0.0005, 0.001]
         
         if search_type == 'auto':
             # Auto mode: SUPERSET of quick mode + adaptive exploration based on data
-            # This ensures auto always explores at least what quick would explore,
-            # plus additional options that may help for the specific dataset.
+            # Streamlined for speed while still covering important regions.
             
             # Start with quick's base lookbacks, then add adaptive ones
             base_lookbacks = [60, 120]  # Quick's lookbacks - always included
             
-            # Add adaptive lookbacks based on data size and horizon
-            min_lookback = max(30, self.horizon // 5)  # At least 1/5 of horizon
-            max_lookback_search = min(self.max_lookback, data_size // 3)
+            # Add adaptive lookbacks based on data size and horizon - capped for speed
+            min_lookback = max(30, self.horizon // 10)  # At least 1/10 of horizon
+            # Cap max lookback to 1000 for auto mode (speed) - use balanced/exhaustive for larger
+            max_lookback_search = min(1000, self.max_lookback, data_size // 4)
             
-            # Add adaptive values if they differ from base
+            # Add adaptive values - only 2-3 points for speed
             adaptive_lookbacks = [
                 min_lookback,
-                min_lookback * 2,
-                (min_lookback + max_lookback_search) // 2,
-                int(max_lookback_search * 0.75),
                 max_lookback_search
             ]
+            # Add midpoint only if range is large enough
+            if max_lookback_search > min_lookback * 3:
+                adaptive_lookbacks.append((min_lookback + max_lookback_search) // 2)
             
             # Merge base (quick) + adaptive lookbacks
             all_lookbacks = sorted(set(base_lookbacks + adaptive_lookbacks))
             lookback_values = filter_lookbacks(all_lookbacks)
             
-            # Hidden sizes: include quick's [64, 128] + smaller/larger options based on data
-            hidden_sizes = [32, 64, 128]  # Always include 64, 128 from quick, plus 32
-            if data_size >= 5000:
-                hidden_sizes.append(256)  # Add larger for big datasets
+            # Hidden sizes: reduced - 64 and 128 cover most cases well
+            hidden_sizes = [64, 128]
             
-            # Num layers: quick uses [2], auto adds [3] for larger data/horizons
-            num_layers = [2, 3] if data_size >= 5000 or self.horizon >= 1000 else [2]
+            # Num layers: keep simple - 2 layers works well for most
+            num_layers = [2]
             
             dropout_values = [config_dropout]  # Use config value
             epochs = [config_epochs]  # Use config value
             
-            # Batch sizes: include quick's 128 + more options
-            batch_sizes = [64, 128, 256]
+            # Batch sizes: reduced to 2 options
+            batch_sizes = [128, 256]
             
-            # Learning rates: include quick's 0.001 + additional
-            learning_rates = [0.001, 0.0005]  # Quick uses 0.001
+            # Learning rates: quick's 0.001 + one alternative
+            learning_rates = [0.001, 0.0005]
             
             search_space = {
                 'lookback': lookback_values,
@@ -255,27 +252,14 @@ class LSTMAttentionTuner:
                 'learning_rate': learning_rates,
                 'epochs': epochs,
                 'batch_size': batch_sizes,
-                'use-differencing': [False, True],  # Same as quick
+                'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],  # Same as quick
-                # Smoothing: include quick's options + more
-                # Quick has: None, MA(5), EWMA(0.2)
+                # Smoothing: reduced to most useful options (superset of quick's 3)
                 'smoothing-config': [
-                    (None, None, None),  # No smoothing (quick)
-                    ('moving_average', 3, None),
-                    ('moving_average', 5, None),  # (quick)
-                    ('moving_average', 10, None),
-                    ('moving_average', 25, None),
-                    ('moving_average', 50, None),
-                    ('moving_average', 100, None),
-                    ('moving_average', 200, None),
-                    ('moving_average', 500, None),
-                    ('ewma', None, 0.05),
-                    ('ewma', None, 0.1),
-                    ('ewma', None, 0.2),  # (quick)
-                    ('ewma', None, 0.3),
-                    ('ewma', None, 0.5),
-                    ('ewma', None, 0.7),
-                    ('ewma', None, 0.9),
+                    (None, None, None),  # No smoothing
+                    ('moving_average', 3, None),  # Light MA
+                    ('moving_average', 5, None),  # Moderate MA
+                    ('ewma', None, 0.5),  # Light EWMA
                 ],
             }
             # Include extra-train in the search space when it's not fixed by CLI
@@ -299,11 +283,11 @@ class LSTMAttentionTuner:
                 'batch_size': [128],  # Quick: just one batch size
                 'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],
-                # Quick: test just a few smoothing options
+                # Quick: test just a few light smoothing options
                 'smoothing-config': [
                     (None, None, None),  # No smoothing
-                    ('moving_average', 5, None),
-                    ('ewma', None, 0.2),
+                    ('moving_average', 3, None),  # Light - outlier removal only
+                    ('ewma', None, 0.5),  # Light EWMA
                 ],
             }
             if self.extra_train_provided:
@@ -338,18 +322,21 @@ class LSTMAttentionTuner:
                 'batch_size': [64, 128],  # Balanced: test 2 batch sizes
                 'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],
-                # Balanced: test moderate range of smoothing options
+                # Balanced: test light smoothing options - outlier removal only
                 'smoothing-config': [
                     (None, None, None),  # No smoothing
-                    ('moving_average', 5, None),
-                    ('moving_average', 10, None),
-                    ('moving_average', 50, None),
-                    ('ewma', None, 0.2),
-                    ('ewma', None, 0.3),
+                    ('moving_average', 3, None),  # Very light
+                    ('moving_average', 5, None),  # Light
+                    ('moving_average', 7, None),  # Moderate light
+                    ('ewma', None, 0.5),  # Light EWMA
+                    ('ewma', None, 0.7),  # Very light EWMA
                 ],
             }
+            # Balanced: search extra-train to find optimal training data size
             if self.extra_train_provided:
                 search_space['extra-train'] = [self.extra_train]
+            else:
+                search_space['extra-train'] = [0, 0.001]  # Test with/without extra training
             
             return search_space
         
@@ -379,31 +366,25 @@ class LSTMAttentionTuner:
                 'batch_size': [32, 64, 128, 256],  # Exhaustive: search all common batch sizes
                 'use-differencing': [False, True],
                 'scaler-type': ['none', 'standard', 'robust'],
-                # Exhaustive: test full range of smoothing options
+                # Exhaustive: test light smoothing options - for outlier removal, not pattern destruction
+                # Smoothing should clean noise/spikes, not flatten the underlying signal
                 'smoothing-config': [
                     (None, None, None),  # No smoothing
-                    ('moving_average', 3, None),
-                    ('moving_average', 5, None),
-                    ('moving_average', 10, None),
-                    ('moving_average', 20, None),
-                    ('moving_average', 50, None),
-                    ('moving_average', 100, None),
-                    ('moving_average', 200, None),
-                    ('moving_average', 500, None),
-                    ('moving_average', 1000, None),
-                    ('ewma', None, 0.01),
-                    ('ewma', None, 0.05),
-                    ('ewma', None, 0.1),
-                    ('ewma', None, 0.2),
-                    ('ewma', None, 0.3),
-                    ('ewma', None, 0.5),
-                    ('ewma', None, 0.7),
-                    ('ewma', None, 0.9),
-                    ('ewma', None, 0.95),
+                    ('moving_average', 3, None),  # Very light - single outlier removal
+                    ('moving_average', 5, None),  # Light
+                    ('moving_average', 7, None),  # Moderate light
+                    ('moving_average', 10, None),  # Upper limit for outlier removal
+                    ('ewma', None, 0.3),  # Moderate EWMA
+                    ('ewma', None, 0.5),  # Light EWMA
+                    ('ewma', None, 0.7),  # Very light EWMA
+                    ('ewma', None, 0.9),  # Minimal EWMA - mostly preserves original
                 ],
             }
+            # Exhaustive: search extra-train to find optimal training data size
             if self.extra_train_provided:
                 search_space['extra-train'] = [self.extra_train]
+            else:
+                search_space['extra-train'] = [0, 0.001]  # Test with/without extra training
             
             return search_space
     
@@ -674,21 +655,34 @@ class LSTMAttentionTuner:
             result['heldout'] = True
         return result
     
-    def run_tuning(self, search_space, max_time_per_config=300, use_adaptive=True, initial_best_mape=None):
+    def run_tuning(self, search_space, max_time_per_config=300, use_adaptive=True, initial_best_mape=None,
+                   probe_epochs=None, full_epochs=None):
         """
-        Run hyperparameter tuning with two-phase adaptive search.
+        Run hyperparameter tuning with staged search for auto mode.
         
-        Phase 1 (Exploration): Sample the search space to find promising regions
-        Phase 2 (Exploitation): Refine the best configurations with nearby parameter values
+        For auto mode (use_adaptive=True with probe_epochs set):
+          Phase 1 (Probe): Explore balanced-sized space with reduced epochs (fast screening)
+          Phase 2 (Full Train): Retrain top N configs with full epochs
+          Phase 3: Caller performs single held-out evaluation on the winner
+        
+        For other modes:
+          Phase 1: Explore with full epochs
+          Phase 2: Refine top configs with nearby parameter values
         
         Args:
             search_space: Dictionary of parameter ranges
             max_time_per_config: Skip configs that would take longer than this
-            use_adaptive: Enable two-phase adaptive search (default: True)
+            use_adaptive: Enable adaptive search (default: True)
+            initial_best_mape: Best MAPE from original config (for progress tracking)
+            probe_epochs: If set, Phase 1 uses this reduced epoch count for fast probing
+            full_epochs: If probe_epochs set, Phase 2 retrains top configs with this epoch count
             
         Returns:
             List of results, sorted by MAPE
         """
+        # Determine if we're doing staged search (probe + full train)
+        staged_search = probe_epochs is not None and full_epochs is not None and use_adaptive
+        
         # Generate all possible combinations
         param_names = list(search_space.keys())
         param_values = [search_space[k] for k in param_names]
@@ -696,13 +690,19 @@ class LSTMAttentionTuner:
         
         total_possible = len(all_configs)
         
-        # For adaptive mode, sample Phase 1 (sparse exploration)
-        # For exhaustive mode, test everything
-        if use_adaptive:
-            # Sample ~25-33% of the space, at least 10 configs, at most 50
-            phase1_size = max(10, min(50, total_possible // 3))
+        # For staged search, we explore more of the space in Phase 1 (since it's cheap)
+        # For regular adaptive, sample ~25-33%
+        if staged_search:
+            # Staged: probe ~30-40% of space, capped at 50 for speed
+            phase1_size = max(15, min(50, int(total_possible * 0.35)))
             import random
             random.seed(42)  # Reproducibility
+            phase1_configs = random.sample(all_configs, min(phase1_size, total_possible))
+        elif use_adaptive:
+            # Regular adaptive: sample ~25-33% of the space
+            phase1_size = max(10, min(50, total_possible // 3))
+            import random
+            random.seed(42)
             phase1_configs = random.sample(all_configs, min(phase1_size, total_possible))
         else:
             # Exhaustive: test everything
@@ -710,7 +710,11 @@ class LSTMAttentionTuner:
         
         print(f"\n{'='*70}")
         print(f"LSTM-Attention Hyperparameter Tuning")
-        if use_adaptive:
+        if staged_search:
+            print(f"Mode: STAGED SEARCH (Fast Probe → Full Training on Winners)")
+            print(f"Phase 1: {len(phase1_configs)} configs with {probe_epochs} epochs (from {total_possible} total)")
+            print(f"Phase 2: Top configs retrained with {full_epochs} epochs")
+        elif use_adaptive:
             print(f"Mode: ADAPTIVE (Sparse Exploration → Dense Refinement)")
             print(f"Phase 1 configurations: {len(phase1_configs)} (sampled from {total_possible})")
         else:
@@ -725,9 +729,11 @@ class LSTMAttentionTuner:
         except Exception:
             best_mape_so_far = float('inf')
         
-        # PHASE 1: EXPLORATION - Sample parameter space
+        # PHASE 1: EXPLORATION/PROBE
         print(f"{'='*70}")
-        if use_adaptive:
+        if staged_search:
+            print(f"PHASE 1: FAST PROBE - Testing {len(phase1_configs)} configs with {probe_epochs} epochs each")
+        elif use_adaptive:
             print("PHASE 1: SPARSE EXPLORATION - Sampling parameter space")
         else:
             print("PHASE 1: EXHAUSTIVE SEARCH - Testing all configurations")
@@ -747,14 +753,21 @@ class LSTMAttentionTuner:
                 print(f"\n[{i}/{len(phase1_configs)}] Skipping configuration similar to poor-performing region")
                 continue
 
+            # For staged search, override epochs for probe phase
+            eval_config = config.copy()
+            if staged_search:
+                eval_config['epochs'] = probe_epochs
+
             print(f"\n[{i}/{len(phase1_configs)}] Testing configuration:")
-            for key, val in config.items():
+            for key, val in eval_config.items():
                 if key == 'smoothing-config':
                     print(f"  {key}: {_format_smoothing_config(val)}")
                 else:
                     print(f"  {key}: {val}")
 
-            result = self.evaluate_config(config, verbose=True)
+            result = self.evaluate_config(eval_config, verbose=True)
+            # Store original config (with original epochs) for Phase 2 retraining
+            result['original_config'] = config
 
             if 'error' in result:
                 print(f"  ❌ ERROR: {result['error']}")
@@ -780,8 +793,65 @@ class LSTMAttentionTuner:
 
             results.append(result)
         
-        # PHASE 2: EXPLOITATION - Refine top performers
-        if use_adaptive and len(results) > 0:
+        # PHASE 2: For staged search, retrain top configs with full epochs
+        if staged_search and len(results) > 0:
+            # Sort by MAPE to identify top performers from probe phase
+            valid_results = [r for r in results if 'error' not in r]
+            valid_results.sort(key=lambda x: x['mape'])
+            
+            # Take top N configs for full training (more than regular refinement since this is the main phase)
+            top_n = min(5, len(valid_results))  # Top 5 or fewer
+            
+            if top_n > 0:
+                print(f"\n{'='*70}")
+                print(f"PHASE 2: FULL TRAINING - Retraining top {top_n} configs with {full_epochs} epochs")
+                print(f"{'='*70}\n")
+                
+                phase2_results = []
+                
+                for idx in range(top_n):
+                    probe_result = valid_results[idx]
+                    # Use original config (before epoch override) and set full epochs
+                    original_config = probe_result.get('original_config', probe_result['config'])
+                    full_config = original_config.copy()
+                    full_config['epochs'] = full_epochs
+                    
+                    print(f"\n[Full Train {idx+1}/{top_n}] Probe MAPE was {probe_result['mape']:.2f}%")
+                    print(f"  Retraining with {full_epochs} epochs:")
+                    for key, val in full_config.items():
+                        if key == 'smoothing-config':
+                            print(f"    {key}: {_format_smoothing_config(val)}")
+                        else:
+                            print(f"    {key}: {val}")
+                    
+                    result = self.evaluate_config(full_config, verbose=True)
+                    result['original_config'] = original_config
+                    result['probe_mape'] = probe_result['mape']  # Track probe performance
+                    
+                    if 'error' in result:
+                        print(f"  ❌ ERROR: {result['error']}")
+                    else:
+                        improvement = probe_result['mape'] - result['mape']
+                        print(f"  ✓ MAPE: {result['mape']:.2f}% | "
+                              f"RMSE: {result['rmse']:.2f} | "
+                              f"Train: {result['train_time']:.1f}s")
+                        if improvement > 0:
+                            print(f"    📈 Improved {improvement:.2f}% from probe")
+                        elif improvement < 0:
+                            print(f"    📉 Degraded {-improvement:.2f}% from probe (probe was better)")
+                        
+                        if result['mape'] < best_mape_so_far:
+                            print(f"  🌟 NEW BEST! (Previous: {best_mape_so_far:.2f}%)")
+                            best_mape_so_far = result['mape']
+                    
+                    phase2_results.append(result)
+                
+                # Replace results with Phase 2 results (these are the real results with full training)
+                # Keep only the fully-trained results for final ranking
+                results = phase2_results
+        
+        # PHASE 2 (non-staged): EXPLOITATION - Refine top performers
+        elif use_adaptive and len(results) > 0:
             # Sort by MAPE to identify top performers
             results.sort(key=lambda x: x['mape'])
             
@@ -1260,7 +1330,19 @@ Note:
     
     # Run tuning (seed with original MAPE if available so we don't incorrectly
     # treat worse configs as "NEW BEST" during phase 1)
-    results = tuner.run_tuning(search_space, initial_best_mape=original_mape)
+    # For auto mode, use staged search: fast probe with reduced epochs, then full training on winners
+    if args.mode == 'auto':
+        probe_epochs = 30   # Fast probing with reduced epochs
+        full_epochs = 150   # Full training for top candidates
+        print(f"\nStaged search enabled: probe={probe_epochs} epochs, full={full_epochs} epochs")
+        results = tuner.run_tuning(
+            search_space, 
+            initial_best_mape=original_mape,
+            probe_epochs=probe_epochs,
+            full_epochs=full_epochs
+        )
+    else:
+        results = tuner.run_tuning(search_space, initial_best_mape=original_mape)
     
     # Add original config result to results list for comparison (if it exists)
     if original_result is not None and 'error' not in original_result:
