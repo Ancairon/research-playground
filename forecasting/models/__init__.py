@@ -4,7 +4,8 @@ Model factory - creates forecasting models by name.
 
 from typing import Dict, Any, Type
 from .base_model import BaseTimeSeriesModel
-from .xgboost_model import XGBoostModel
+
+# Core models (always available)
 from .lstm_model import LSTMModel
 from .random_forest_model import RandomForestModel
 from .extra_trees_model import ExtraTreesModel
@@ -12,12 +13,27 @@ from .gru_model import GRUModel
 from .lstm_attention_model import LSTMAttentionModel
 from .nbeats_model import NBEATSModel
 from .tft_model import TFTModel
-from .timesfm_model import TimesFMModel
+
+# Optional models (may have dependency issues)
+try:
+    from .xgboost_model import XGBoostModel
+    _XGBOOST_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: XGBoostModel not available (pycaret import failed): {e}")
+    XGBoostModel = None
+    _XGBOOST_AVAILABLE = False
+
+try:
+    from .timesfm_model import TimesFMModel
+    _TIMESFM_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: TimesFMModel not available: {e}")
+    TimesFMModel = None
+    _TIMESFM_AVAILABLE = False
 
 
 # Registry of available models
 MODEL_REGISTRY: Dict[str, Type[BaseTimeSeriesModel]] = {
-    'xgboost': XGBoostModel,
     'lstm': LSTMModel,
     'randomforest': RandomForestModel,
     'rf': RandomForestModel,  # Alias
@@ -28,9 +44,15 @@ MODEL_REGISTRY: Dict[str, Type[BaseTimeSeriesModel]] = {
     'lstm-attn': LSTMAttentionModel,  # Alias
     'nbeats': NBEATSModel,
     'tft': TFTModel,
-    'timesfm': TimesFMModel,
-    'times-fm': TimesFMModel,
 }
+
+# Add optional models if available
+if _XGBOOST_AVAILABLE:
+    MODEL_REGISTRY['xgboost'] = XGBoostModel
+
+if _TIMESFM_AVAILABLE:
+    MODEL_REGISTRY['timesfm'] = TimesFMModel
+    MODEL_REGISTRY['times-fm'] = TimesFMModel
 
 
 def create_model(model_name: str, **kwargs) -> BaseTimeSeriesModel:

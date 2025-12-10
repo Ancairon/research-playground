@@ -1,0 +1,36 @@
+# Unified requirements for forecasting and production-forecasting
+# Compatible with Python 3.11
+
+# Core data science
+pandas>=2.0.0,<2.2.0
+numpy>=1.24.0,<2.0.0
+
+# Machine Learning
+scikit-learn>=1.3.0,<1.4.0
+joblib>=1.3.0
+
+# Deep Learning (PyTorch)
+torch>=2.0.0,<2.3.0
+
+# XGBoost (standalone, without pycaret)
+xgboost>=1.7.0,<2.1.0
+
+# Web server (for production endpoint)
+flask>=2.3.0,<3.0.0
+
+# Visualization
+matplotlib>=3.7.0,<4.0.0
+
+# Config files
+pyyaml>=6.0
+
+# HTTP requests (for some scripts)
+requests>=2.31.0
+
+# Optional: PyCaret for XGBoost model (may have sklearn compatibility issues)
+# Uncomment only if needed and use scikit-learn==1.2.2 instead
+# pycaret[time_series]>=3.0.0,<3.3.0
+
+# Note: If you need pycaret, you may need to pin versions:
+# scikit-learn==1.2.2
+# pycaret==3.2.0

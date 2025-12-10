@@ -1,4 +1,18 @@
+__pycache__/
 __pycache*
+*.pyc
+*.pyo
 .python-version
 logs.*
 .env
+
+# SSL certificates
+*.pem
+
+# Generated files
+visualization.html
+plot.png
+
+# Model cache
+production-forecasting/models/__pycache__/
+forecasting/cache/
