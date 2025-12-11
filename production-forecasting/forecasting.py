@@ -42,29 +42,30 @@ def evaluate_model_config(
     min_required = train_window + horizon
     if len(data) < min_required:
         return {'error': f'Insufficient data: need {min_required}, have {len(data)}', 'mape': float('inf')}
-    
+
     min_train_window = lookback + horizon
     if train_window < min_train_window:
         return {'error': f'train_window {train_window} < minimum {min_train_window}', 'mape': float('inf')}
-    
+
     # Calculate indices (predict LAST horizon points)
     data_end = len(data)
     prediction_start = data_end - horizon
     train_start = prediction_start - train_window
     train_end = prediction_start
-    
+
     if train_start < 0:
         return {'error': f'Not enough data: need {train_window + horizon}, have {len(data)}', 'mape': float('inf')}
-    
+
     # Get training data
     train_data = data.iloc[train_start:train_end]
-    
+
     # Apply smoothing if configured
     try:
-        train_data_smoothed = apply_smoothing(train_data, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else train_data
+        train_data_smoothed = apply_smoothing(
+            train_data, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else train_data
     except Exception:
         train_data_smoothed = train_data
-    
+
     # Train model
     start_time = time.time()
     try:
@@ -72,58 +73,64 @@ def evaluate_model_config(
     except Exception as e:
         return {'error': f'Training failed: {str(e)}', 'mape': float('inf')}
     train_time = time.time() - start_time
-    
+
     # Get prediction input (last lookback points)
     prediction_input = train_data.iloc[-lookback:]
-    
+
     # Apply smoothing to prediction input if configured
     try:
-        prediction_input_smoothed = apply_smoothing(prediction_input, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else prediction_input
+        prediction_input_smoothed = apply_smoothing(
+            prediction_input, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else prediction_input
     except Exception:
         prediction_input_smoothed = prediction_input
-    
+
     # Update model with live data if supported
     if model.supports_online_learning():
         try:
             model.update(prediction_input_smoothed)
         except Exception:
             pass
-    
+
     # Make predictions
     inference_start = time.time()
     try:
         predictions = model.predict()
         if not predictions:
             return {'error': 'No predictions generated', 'mape': float('inf')}
-        predictions = [max(-1e9, min(1e9, float(p))) if np.isfinite(p) else 0.0 for p in predictions]
+        predictions = [max(-1e9, min(1e9, float(p)))
+                       if np.isfinite(p) else 0.0 for p in predictions]
     except Exception as e:
         return {'error': f'Prediction failed: {str(e)}', 'mape': float('inf')}
     inference_time = time.time() - inference_start
-    
+
     # Get actual values
     actuals = [float(data.iloc[prediction_start + i]) for i in range(horizon)]
-    
+
     # Apply smoothing to actuals for evaluation if configured
     actuals_orig = list(actuals)
     try:
-        actuals_eval = apply_smoothing(actuals, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else actuals
+        actuals_eval = apply_smoothing(actuals, method=smoothing_method, window=smoothing_window,
+                                       alpha=smoothing_alpha) if smoothing_method else actuals
         if isinstance(actuals_eval, pd.Series):
             actuals_eval = list(actuals_eval.values)
     except Exception:
         actuals_eval = actuals
-    
+
     # Calculate metrics (sMAPE)
     errors = []
     for actual, pred in zip(actuals_eval, predictions):
         err_abs = abs(actual - pred)
         denominator = (abs(actual) + abs(pred)) / 2.0
-        mape_val = 0.0 if denominator < 1e-6 else min((err_abs / denominator) * 100.0, 1000.0)
+        mape_val = 0.0 if denominator < 1e-6 else min(
+            (err_abs / denominator) * 100.0, 1000.0)
         errors.append(mape_val)
-    
+
     mape = np.mean(errors) if errors else float('inf')
-    mbe = np.mean([actual - pred for actual, pred in zip(actuals_eval, predictions)])
-    rmse = np.sqrt(np.mean([(actual - pred)**2 for actual, pred in zip(actuals_eval, predictions)]))
-    
+    mbe = np.mean([actual - pred for actual,
+                  pred in zip(actuals_eval, predictions)])
+    rmse = np.sqrt(np.mean(
+        [(actual - pred)**2 for actual, pred in zip(actuals_eval, predictions)]))
+
     return {
         'predictions': predictions,
         'actuals': actuals_orig,
@@ -138,10 +145,8 @@ def evaluate_model_config(
         'smoothing_applied': smoothing_method is not None
     }
 
-
-# ============================================================================
 # PYTORCH MODEL COMPONENTS
-# ============================================================================
+
 
 class TimeSeriesDataset(Dataset):
     """Sliding window dataset for time series."""
@@ -517,10 +522,8 @@ class LSTMAttentionModel:
     def supports_online_learning(self) -> bool:
         return False
 
-
-# ============================================================================
 # HYPERPARAMETER TUNING
-# ============================================================================
+
 
 def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
     """
@@ -954,23 +957,25 @@ def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) ->
         model.train(train_data_for_training, epochs=config_epochs, quiet=False)
 
         prediction_input = train_data.iloc[-lookback:]
-        
+
         # Apply smoothing to prediction input if configured
         try:
-            prediction_input_smoothed = apply_smoothing(prediction_input, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else prediction_input
+            prediction_input_smoothed = apply_smoothing(
+                prediction_input, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else prediction_input
         except Exception:
             prediction_input_smoothed = prediction_input
-        
+
         # Update model if supported
         if model.supports_online_learning():
             try:
                 model.update(prediction_input_smoothed)
             except Exception:
                 pass
-        
+
         predictions = model.predict()
         if predictions:
-            predictions = [max(-1e9, min(1e9, float(p))) if np.isfinite(p) else 0.0 for p in predictions]
+            predictions = [max(-1e9, min(1e9, float(p)))
+                           if np.isfinite(p) else 0.0 for p in predictions]
 
         results = {
             'predictions': predictions,
@@ -981,4 +986,3 @@ def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) ->
         }
 
     return results
-

@@ -1,14 +1,12 @@
 """
 Simple smoothing utilities for forecasting pipeline.
 
-Provides a single `apply_smoothing` helper used by the forecaster and
-evaluation code. Supported methods:
+Provides a single `apply_smoothing` helper used by the forecaster and evaluation code. Supported methods:
 
 - 'moving_average' / 'ma': simple trailing moving average
 - 'ewma' / 'exponential': exponential weighted moving average
 
-The functions accept pandas Series or lists and always return the same
-type/length as the input (Series -> Series, list -> list of floats).
+The functions accept pandas Series or lists and always return the same type/length as the input (Series -> Series, list -> list of floats).
 """
 from typing import Union, List, Optional
 import pandas as pd
