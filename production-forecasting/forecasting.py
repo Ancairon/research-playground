@@ -23,6 +23,28 @@ from sklearn.preprocessing import StandardScaler, RobustScaler
 from smoothing import apply_smoothing
 
 
+def sanitize_for_json(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (pd.Series, pd.Index)):
+        return obj.tolist()
+    elif isinstance(obj, bool):
+        return bool(obj)
+    elif obj is None or isinstance(obj, (int, float, str)):
+        return obj
+    else:
+        return str(obj)
+
+
 def evaluate_model_config(
     model,  # LSTMAttentionModel
     data: pd.Series,
@@ -141,7 +163,7 @@ def evaluate_model_config(
     rmse = np.sqrt(np.mean(
         [(actual - pred)**2 for actual, pred in zip(actuals_eval, predictions)]))
 
-    return {
+    result = {
         'predictions': predictions,
         'actuals': actuals_orig,
         'smoothed_actuals': actuals_eval,
@@ -156,6 +178,8 @@ def evaluate_model_config(
         'train_window': train_window,
         'smoothing_applied': smoothing_method is not None
     }
+    
+    return sanitize_for_json(result)
 
 # PYTORCH MODEL COMPONENTS
 
@@ -303,9 +327,9 @@ class LSTMAttentionModel:
         self.last_data_raw = None
         self.last_value = None
 
-        if not torch.cuda.is_available() and (hidden_size >= 128 or lookback >= 180):
-            warnings.warn(
-                "Training on CPU - large model may be slow. Consider using GPU.")
+        # if not torch.cuda.is_available() and (hidden_size >= 128 or lookback >= 180):
+        #     warnings.warn(
+        #         "Training on CPU - large model may be slow. Consider using GPU.")
 
         # Set random seeds for reproducibility
         torch.manual_seed(random_state)
@@ -889,8 +913,8 @@ def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) ->
         print(f"  {k}: {v}")
     print(f"{'='*60}\n")
 
-    lookback = best_config['lookback']
-    train_window = lookback + horizon
+    lookback = int(best_config['lookback'])
+    train_window = int(lookback + horizon)
 
     smoothing_method = None
     smoothing_window = 3
@@ -988,4 +1012,4 @@ def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) ->
             'smoothing_applied': smoothing_method is not None,
         }
 
-    return results
+    return sanitize_for_json(results)

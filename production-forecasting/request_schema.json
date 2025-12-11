@@ -1,0 +1,135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Forecast Request",
+  "description": "Request schema for POST /forecast endpoint",
+  "type": "object",
+  "required": ["horizon"],
+  "oneOf": [
+    {
+      "required": ["data"]
+    },
+    {
+      "required": ["csv_data"]
+    },
+    {
+      "required": ["csv_path"]
+    }
+  ],
+  "properties": {
+    "horizon": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of future points to forecast. Must be positive."
+    },
+    "data": {
+      "description": "Time series data in one of three formats: simple array, CSV format, or Netdata format",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 10,
+          "description": "Simple array format: [1, 2, 3, 4, 5, ...] - sequential timestamps assumed"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["timestamp", "value"],
+            "properties": {
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "ISO 8601 timestamp"
+              },
+              "value": {
+                "type": "number",
+                "description": "Metric value"
+              }
+            }
+          },
+          "minItems": 10,
+          "description": "CSV format: [{\"timestamp\": \"2024-01-01T00:00:00\", \"value\": 1.5}, ...]"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": [
+              {
+                "type": "integer",
+                "description": "Unix timestamp (seconds)"
+              },
+              {
+                "oneOf": [
+                  {
+                    "type": "number",
+                    "description": "Single value"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "description": "Array of values (first value is used)"
+                  }
+                ]
+              }
+            ]
+          },
+          "minItems": 10,
+          "description": "Netdata format: [[1765387008, [0.0253978, 0, 0]], ...] - automatically sorted ascending"
+        }
+      ]
+    },
+    "csv_data": {
+      "type": "string",
+      "description": "CSV string with 'timestamp,value' columns"
+    },
+    "csv_path": {
+      "type": "string",
+      "description": "Path to CSV file with 'timestamp,value' columns"
+    },
+    "evaluation": {
+      "type": "boolean",
+      "default": true,
+      "description": "If true: predict last 'horizon' points and return metrics. If false: predict future 'horizon' points."
+    },
+    "invoke_helper": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true: generate visualization HTML and return URL to access it."
+    }
+  },
+  "examples": [
+    {
+      "horizon": 5,
+      "data": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50],
+      "evaluation": true
+    },
+    {
+      "horizon": 5,
+      "data": [
+        [1765387008, [0.0253978, 0, 0]],
+        [1765120896, [0.0264692, 0, 0]],
+        [1764854784, [0.0245871, 0, 0]],
+        [1764588672, [0.0246141, 0, 0]]
+      ],
+      "evaluation": true,
+      "invoke_helper": true
+    },
+    {
+      "horizon": 3,
+      "data": [
+        {"timestamp": "2024-12-01T00:00:00", "value": 10.5},
+        {"timestamp": "2024-12-01T01:00:00", "value": 11.2},
+        {"timestamp": "2024-12-01T02:00:00", "value": 10.8},
+        {"timestamp": "2024-12-01T03:00:00", "value": 11.5}
+      ],
+      "evaluation": true
+    }
+  ]
+}

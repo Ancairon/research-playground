@@ -6,6 +6,8 @@ Accepts POST /forecast with JSON payload containing horizon and data, runs LSTM-
 
 import os
 import ssl
+import json
+import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify
 from forecasting import tune_and_forecast
@@ -13,9 +15,31 @@ import subprocess
 from io import StringIO
 from flask import request
 from visualize_helper import generate_visualization_html
+from jsonschema import validate, ValidationError
+
+
+# Load schemas
+with open('request_schema.json', 'r') as f:
+    REQUEST_SCHEMA = json.load(f)
+
+with open('response_schema.json', 'r') as f:
+    RESPONSE_SCHEMA = json.load(f)
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for NumPy types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 app = Flask(__name__)
+app.json_encoder = NumpyEncoder
 
 
 @app.route('/forecast', methods=['POST'])
@@ -30,6 +54,12 @@ def forecast():
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
+
+        # Validate request against schema
+        try:
+            validate(instance=data, schema=REQUEST_SCHEMA)
+        except ValidationError as e:
+            return jsonify({'error': f'Invalid request: {e.message}'}), 400
 
         horizon = data.get('horizon')
         if not isinstance(horizon, int) or horizon <= 0:
@@ -55,17 +85,30 @@ def forecast():
         # Run tuning and forecasting
         results = tune_and_forecast(time_series, horizon, evaluation)
 
+        # Convert NumPy types to native Python types for JSON serialization
+        predictions = results['predictions']
+        if isinstance(predictions, np.ndarray):
+            predictions = predictions.tolist()
+        elif isinstance(predictions, list):
+            predictions = [float(x) if isinstance(x, (np.floating, np.integer)) else x for x in predictions]
+
         response = {
-            'predictions': results['predictions']
+            'predictions': predictions
         }
 
         if evaluation:
+            actuals = results['actuals']
+            if isinstance(actuals, np.ndarray):
+                actuals = actuals.tolist()
+            elif isinstance(actuals, list):
+                actuals = [float(x) if isinstance(x, (np.floating, np.integer)) else x for x in actuals]
+            
             response['metrics'] = {
-                'mape': results['mape'],
-                'rmse': results['rmse'],
-                'mbe': results['mbe']
+                'mape': float(results['mape']),
+                'rmse': float(results['rmse']),
+                'mbe': float(results['mbe'])
             }
-            response['actuals'] = results['actuals']
+            response['actuals'] = actuals
 
         if invoke_helper:
             metrics = response.get('metrics') if evaluation else None
@@ -83,10 +126,18 @@ def forecast():
             )
             response['visualization_url'] = viz_url
 
+        # Validate response against schema before returning
+        try:
+            validate(instance=response, schema=RESPONSE_SCHEMA)
+        except ValidationError as e:
+            print(f"Warning: Response validation failed: {e.message}")
+            # Don't fail the request, just log the warning
+
         return jsonify(response)
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        error_response = {'error': str(e)}
+        return jsonify(error_response), 500
 
 
 def parse_data(data):

@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Forecast Response",
+  "description": "Response schema for POST /forecast endpoint",
+  "oneOf": [
+    {
+      "title": "Success Response",
+      "type": "object",
+      "required": ["predictions"],
+      "properties": {
+        "predictions": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Forecasted values for the next 'horizon' points"
+        },
+        "metrics": {
+          "type": "object",
+          "required": ["mape", "rmse", "mbe"],
+          "properties": {
+            "mape": {
+              "type": "number",
+              "description": "Symmetric Mean Absolute Percentage Error (%)"
+            },
+            "rmse": {
+              "type": "number",
+              "description": "Root Mean Squared Error"
+            },
+            "mbe": {
+              "type": "number",
+              "description": "Mean Bias Error"
+            }
+          },
+          "description": "Evaluation metrics (only present if evaluation=true)"
+        },
+        "actuals": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Actual values for the last 'horizon' points (only present if evaluation=true)"
+        },
+        "visualization_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to access Chart.js visualization HTML (only present if invoke_helper=true)"
+        }
+      }
+    },
+    {
+      "title": "Error Response",
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "string",
+          "description": "Error message describing what went wrong"
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "predictions": [51.234, 52.456, 53.678, 54.89, 56.012],
+      "metrics": {
+        "mape": 2.34,
+        "rmse": 1.23,
+        "mbe": 0.45
+      },
+      "actuals": [51.0, 52.0, 53.0, 54.0, 55.0]
+    },
+    {
+      "predictions": [0.0251234, 0.0252456, 0.0253678, 0.025489, 0.0256012],
+      "metrics": {
+        "mape": 1.23,
+        "rmse": 0.0012,
+        "mbe": 0.0001
+      },
+      "actuals": [0.0251, 0.0252, 0.0253, 0.0254, 0.0255],
+      "visualization_url": "https://localhost:5000/visualization.html"
+    },
+    {
+      "predictions": [51.234, 52.456, 53.678, 54.89, 56.012, 57.134, 58.256, 59.378, 60.49, 61.612]
+    },
+    {
+      "error": "Invalid horizon: must be positive integer"
+    },
+    {
+      "error": "Insufficient data for forecasting"
+    }
+  ]
+}
