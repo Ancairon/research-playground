@@ -20,6 +20,12 @@ app = Flask(__name__)
 
 @app.route('/forecast', methods=['POST'])
 def forecast():
+    """
+    Main forecasting endpoint. Accepts time series data, tunes LSTM-Attention model,
+    generates predictions, and optionally returns visualization.
+    
+    POST body: {horizon: int, data: array, evaluation: bool, invoke_helper: bool}
+    """
     try:
         data = request.get_json()
         if not data:
@@ -84,7 +90,7 @@ def forecast():
 
 
 def parse_data(data):
-    """Parse data from various formats into pd.Series."""
+    """Parse data from CSV format, Netdata format, or simple arrays into pd.Series."""
     if isinstance(data, list):
         if data and isinstance(data[0], dict) and 'timestamp' in data[0] and 'value' in data[0]:
             # CSV format: [{"timestamp": str, "value": float}, ...]
@@ -101,6 +107,9 @@ def parse_data(data):
         else:
             # Simple array: assume sequential timestamps
             series = pd.Series(data)
+
+        # Netdata responses arrive newest→oldest; sort ascending to keep model/plots correct
+        series = series.sort_index()
     else:
         raise ValueError('Data must be array')
     return series
@@ -119,7 +128,7 @@ _last_visualization_html = None
 
 def run_visualization_helper(data, predictions, horizon, metrics=None, actuals=None, train_window=None,
                              smoothed_train_data=None, smoothed_actuals=None, raw_train_data=None):
-    """Generate visualization HTML and store it for serving."""
+    """Generate Chart.js visualization HTML and store in global for /visualization.html endpoint."""
     global _last_visualization_html
 
     # Use raw_train_data from results if available (already correctly sliced)

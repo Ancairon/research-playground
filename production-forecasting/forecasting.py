@@ -36,7 +36,10 @@ def evaluate_model_config(
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
-    Train and evaluate model configuration
+    Train and evaluate a model configuration on time series data.
+    
+    Predicts the last `horizon` points using `train_window` history.
+    Returns predictions, actuals, metrics (sMAPE, RMSE, MBE), and timing.
     """
     # Data validation
     min_required = train_window + horizon
@@ -65,6 +68,13 @@ def evaluate_model_config(
             train_data, method=smoothing_method, window=smoothing_window, alpha=smoothing_alpha) if smoothing_method else train_data
     except Exception:
         train_data_smoothed = train_data
+
+    # Capture train data for visualization (raw + smoothed)
+    train_data_raw_list = list(train_data.values) if hasattr(train_data, 'values') else list(train_data)
+    if isinstance(train_data_smoothed, pd.Series):
+        smoothed_train_list = list(train_data_smoothed.values)
+    else:
+        smoothed_train_list = list(train_data_smoothed)
 
     # Train model
     start_time = time.time()
@@ -135,6 +145,8 @@ def evaluate_model_config(
         'predictions': predictions,
         'actuals': actuals_orig,
         'smoothed_actuals': actuals_eval,
+        'train_data': train_data_raw_list,
+        'smoothed_train_data': smoothed_train_list,
         'train_time': train_time,
         'inference_time': inference_time,
         'mape': mape,
@@ -527,17 +539,11 @@ class LSTMAttentionModel:
 
 def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
     """
-    Tune LSTM-Attention hyperparameters using staged search.
-
-    Phase 1: Fast probe with 30 epochs on sampled configs (35%, max 50)
-    Phase 2: Full training with 150 epochs on top 5 performers
-
-    Args:
-        data: Time series data
-        horizon: Number of future steps to predict
-
-    Returns:
-        Best hyperparameter configuration dict
+    Staged hyperparameter search: 30-epoch probe on ~35% configs, then 150-epoch
+    full training on top 5 performers. Searches lookback, hidden_size, learning_rate,
+    batch_size, differencing, scaling, and smoothing options.
+    
+    Returns: Best config dict with tuned hyperparameters
     """
     data_size = len(data)
     max_lookback = data_size // 3
@@ -868,15 +874,12 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
 
 def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) -> Dict[str, Any]:
     """
-    Tune hyperparameters and perform forecast.
-
-    Args:
-        data: Time series data
-        horizon: Number of future steps to predict
-        evaluation: If True, evaluate against held-out actuals
-
-    Returns:
-        Dict with predictions, metrics (if evaluation), and metadata
+    Complete pipeline: tune hyperparameters, train model, generate predictions.
+    
+    If evaluation=True: predict last `horizon` points and return metrics.
+    If evaluation=False: train on all data and forecast future `horizon` points.
+    
+    Returns: {predictions, actuals?, metrics?, train_data, smoothed_train_data?, ...}
     """
     best_config = tune_lstm_attention(data, horizon)
 
