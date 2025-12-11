@@ -9,7 +9,7 @@ import os
 import ssl
 import pandas as pd
 from flask import Flask, request, jsonify
-from universal_forecaster import tune_and_forecast
+from forecasting import tune_and_forecast
 import subprocess
 
 app = Flask(__name__)
