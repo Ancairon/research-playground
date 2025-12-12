@@ -1,7 +1,6 @@
 {
   "invoke_helper": true,
   "horizon": 2802,
-  "evaluation": true,
   "data": [
     {
       "timestamp": "2025-08-22T09:08:42",
