@@ -5,6 +5,7 @@ __pycache*
 .python-version
 logs.*
 .env
+response.txt
 
 # SSL certificates
 *.pem

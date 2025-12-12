@@ -45,6 +45,61 @@ def sanitize_for_json(obj):
         return str(obj)
 
 
+def detect_granularity(data: pd.Series) -> Optional[int]:
+    """
+    Detect the time granularity (in seconds) of a time series with timestamp index.
+    
+    Since granularity is stable and consistent in the data, we calculate it from
+    the first few intervals and return a single stable value.
+    
+    Returns:
+        Granularity in seconds, or None if timestamps are not available.
+    """
+    if not hasattr(data, 'index') or not hasattr(data.index, 'to_pydatetime'):
+        return None
+    
+    try:
+        timestamps = data.index.to_pydatetime()
+        if len(timestamps) < 2:
+            return None
+        
+        # Calculate granularity from first interval (data is stable)
+        granularity = int((timestamps[1] - timestamps[0]).total_seconds())
+        return max(1, granularity)  # At least 1 second
+    except Exception:
+        return None
+
+
+def calculate_future_timestamps(last_timestamp, granularity: int, horizon: int, as_unix: bool = False):
+    """
+    Calculate future timestamps based on last timestamp and granularity.
+    
+    Args:
+        last_timestamp: Last observed timestamp (datetime, ISO string, or Unix timestamp)
+        granularity: Time granularity in seconds
+        horizon: Number of future points to predict
+        as_unix: If True, return Unix timestamps (integers); otherwise ISO 8601 strings
+    
+    Returns:
+        List of timestamps (Unix integers if as_unix=True, ISO 8601 strings otherwise)
+    """
+    if isinstance(last_timestamp, str):
+        last_timestamp = pd.to_datetime(last_timestamp)
+    elif isinstance(last_timestamp, (int, float)):
+        # Unix timestamp
+        last_timestamp = pd.to_datetime(last_timestamp, unit='s')
+    
+    future_timestamps = []
+    for i in range(1, horizon + 1):
+        future_ts = last_timestamp + pd.Timedelta(seconds=granularity * i)
+        if as_unix:
+            future_timestamps.append(int(future_ts.timestamp()))
+        else:
+            future_timestamps.append(future_ts.isoformat())
+    
+    return future_timestamps
+
+
 def evaluate_model_config(
     model,  # LSTMAttentionModel
     data: pd.Series,
@@ -55,12 +110,17 @@ def evaluate_model_config(
     smoothing_window: int = 3,
     smoothing_alpha: float = 0.2,
     epochs: int = 100,
-    verbose: bool = False
+    verbose: bool = False,
+    use_unix_timestamps: bool = False
 ) -> Dict[str, Any]:
     """
     Train and evaluate a model configuration on time series data.
 
     Predicts the last `horizon` points using `train_window` history.
+    Returns predictions, actuals, metrics, and timestamps.
+    
+    Args:
+        use_unix_timestamps: If True, return Unix timestamps (integers); otherwise ISO 8601 strings
     Returns predictions, actuals, metrics (sMAPE, RMSE, MBE), and timing.
     """
     # Data validation
@@ -138,6 +198,17 @@ def evaluate_model_config(
 
     # Get actual values
     actuals = [float(data.iloc[prediction_start + i]) for i in range(horizon)]
+    
+    # Extract actual timestamps from the data index (if available)
+    actual_timestamps = []
+    if hasattr(data, 'index') and hasattr(data.index, 'to_pydatetime'):
+        try:
+            if use_unix_timestamps:
+                actual_timestamps = [int(data.index[prediction_start + i].timestamp()) for i in range(horizon)]
+            else:
+                actual_timestamps = [data.index[prediction_start + i].isoformat() for i in range(horizon)]
+        except Exception:
+            actual_timestamps = []
 
     # Apply smoothing to actuals for evaluation if configured
     actuals_orig = list(actuals)
@@ -166,7 +237,9 @@ def evaluate_model_config(
 
     result = {
         'predictions': predictions,
+        'prediction_timestamps': actual_timestamps,
         'actuals': actuals_orig,
+        'actual_timestamps': actual_timestamps,
         'smoothed_actuals': actuals_eval,
         'train_data': train_data_raw_list,
         'smoothed_train_data': smoothed_train_list,
@@ -889,12 +962,15 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
         return "No suitable config found with MAPE < 50%."
 
 
-def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) -> Dict[str, Any]:
+def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True, use_unix_timestamps: bool = False) -> Dict[str, Any]:
     """
     Complete pipeline: tune hyperparameters, train model, generate predictions.
 
     If evaluation=True: predict last `horizon` points and return metrics.
     If evaluation=False: train on all data and forecast future `horizon` points.
+    
+    Args:
+        use_unix_timestamps: If True, return Unix timestamps (integers); otherwise ISO 8601 strings
 
     Returns: {predictions, actuals?, metrics?, train_data, smoothed_train_data?, ...}
     """
@@ -949,7 +1025,8 @@ def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) ->
             smoothing_window=smoothing_window,
             smoothing_alpha=smoothing_alpha,
             epochs=config_epochs,
-            verbose=True
+            verbose=True,
+            use_unix_timestamps=use_unix_timestamps
         )
     else:
         train_data = data.iloc[-train_window:] if len(
@@ -1002,8 +1079,22 @@ def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) ->
             predictions = [max(-1e9, min(1e9, float(p)))
                            if np.isfinite(p) else 0.0 for p in predictions]
 
+        # Detect granularity and calculate future timestamps
+        granularity = detect_granularity(data)
+        prediction_timestamps = []
+        if granularity is not None and hasattr(data, 'index') and len(data.index) > 0:
+            try:
+                last_timestamp = data.index[-1]
+                prediction_timestamps = calculate_future_timestamps(
+                    last_timestamp, granularity, horizon, as_unix=use_unix_timestamps
+                )
+            except Exception:
+                prediction_timestamps = []
+
         results = {
             'predictions': predictions,
+            'prediction_timestamps': prediction_timestamps,
+            'granularity': granularity if granularity else None,
             'train_window': train_window,
             'train_data': list(train_data.values) if hasattr(train_data, 'values') else list(train_data),
             'smoothed_train_data': smoothed_train,

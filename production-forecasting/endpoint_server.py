@@ -68,9 +68,10 @@ def forecast():
         invoke_helper = data.get('invoke_helper', False)
         evaluation = data.get('evaluation', False)
 
-        # Parse data
+        # Parse data and detect timestamp format
+        use_unix_timestamps = False
         if 'data' in data:
-            time_series = parse_data(data['data'])
+            time_series, use_unix_timestamps = parse_data(data['data'])
         elif 'csv_data' in data:
             time_series = parse_csv_data(data['csv_data'])
         elif 'csv_path' in data:
@@ -83,7 +84,7 @@ def forecast():
             return jsonify({'error': 'Insufficient data for forecasting'}), 400
 
         # Run tuning and forecasting
-        results = tune_and_forecast(time_series, horizon, evaluation)
+        results = tune_and_forecast(time_series, horizon, evaluation, use_unix_timestamps)
 
         if results.get("error"):
             return jsonify({'error': results["error"]}), 500
@@ -95,9 +96,19 @@ def forecast():
         elif isinstance(predictions, list):
             predictions = [float(x) if isinstance(x, (np.floating, np.integer)) else x for x in predictions]
 
+        # Format predictions with timestamps if available
+        prediction_timestamps = results.get('prediction_timestamps', [])
+        if prediction_timestamps and len(prediction_timestamps) == len(predictions):
+            # Format as [timestamp, value] pairs
+            predictions = [[ts, float(val)] for ts, val in zip(prediction_timestamps, predictions)]
+
         response = {
             'predictions': predictions
         }
+
+        # Add granularity for prediction mode (evaluation=false) with timestamps
+        if not evaluation and 'granularity' in results and results['granularity'] is not None:
+            response['granularity'] = results['granularity']
 
         if evaluation:
             actuals = results['actuals']
@@ -105,6 +116,11 @@ def forecast():
                 actuals = actuals.tolist()
             elif isinstance(actuals, list):
                 actuals = [float(x) if isinstance(x, (np.floating, np.integer)) else x for x in actuals]
+            
+            # Format actuals with timestamps if available
+            actual_timestamps = results.get('actual_timestamps', [])
+            if actual_timestamps and len(actual_timestamps) == len(actuals):
+                actuals = [[ts, float(val)] for ts, val in zip(actual_timestamps, actuals)]
             
             response['metrics'] = {
                 'mape': float(results['mape']),
@@ -144,29 +160,40 @@ def forecast():
 
 
 def parse_data(data):
-    """Parse data from CSV format, Netdata format, or simple arrays into pd.Series."""
+    """
+    Parse data from CSV format, Netdata format, or simple arrays into pd.Series.
+    
+    Returns:
+        tuple: (pd.Series, use_unix_timestamps: bool)
+    """
+    use_unix_timestamps = False
+    
     if isinstance(data, list):
         if data and isinstance(data[0], dict) and 'timestamp' in data[0] and 'value' in data[0]:
             # CSV format: [{"timestamp": str, "value": float}, ...]
             timestamps = [pd.to_datetime(item['timestamp']) for item in data]
             values = [item['value'] for item in data]
             series = pd.Series(values, index=timestamps)
+            use_unix_timestamps = False
         elif data and isinstance(data[0], list) and len(data[0]) == 2:
             # Netdata format: [[timestamp, [val1, val2, val3]], ...]
             timestamps = [item[0] for item in data]
             values = [item[1][0] if isinstance(
                 item[1], list) else item[1] for item in data]
+            # Check if timestamps are integers (Unix format)
+            use_unix_timestamps = isinstance(timestamps[0], int)
             series = pd.Series(
                 values, index=pd.to_datetime(timestamps, unit='s'))
         else:
             # Simple array: assume sequential timestamps
             series = pd.Series(data)
+            use_unix_timestamps = False
 
         # Netdata responses arrive newest→oldest; sort ascending to keep model/plots correct
         series = series.sort_index()
     else:
         raise ValueError('Data must be array')
-    return series
+    return series, use_unix_timestamps
 
 
 def parse_csv_data(csv_string):
