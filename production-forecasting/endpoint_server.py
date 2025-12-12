@@ -85,6 +85,9 @@ def forecast():
         # Run tuning and forecasting
         results = tune_and_forecast(time_series, horizon, evaluation)
 
+        if results.get("error"):
+            return jsonify({'error': results["error"]}), 500
+
         # Convert NumPy types to native Python types for JSON serialization
         predictions = results['predictions']
         if isinstance(predictions, np.ndarray):

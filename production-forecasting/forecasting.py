@@ -59,7 +59,7 @@ def evaluate_model_config(
 ) -> Dict[str, Any]:
     """
     Train and evaluate a model configuration on time series data.
-    
+
     Predicts the last `horizon` points using `train_window` history.
     Returns predictions, actuals, metrics (sMAPE, RMSE, MBE), and timing.
     """
@@ -92,7 +92,8 @@ def evaluate_model_config(
         train_data_smoothed = train_data
 
     # Capture train data for visualization (raw + smoothed)
-    train_data_raw_list = list(train_data.values) if hasattr(train_data, 'values') else list(train_data)
+    train_data_raw_list = list(train_data.values) if hasattr(
+        train_data, 'values') else list(train_data)
     if isinstance(train_data_smoothed, pd.Series):
         smoothed_train_list = list(train_data_smoothed.values)
     else:
@@ -178,7 +179,7 @@ def evaluate_model_config(
         'train_window': train_window,
         'smoothing_applied': smoothing_method is not None
     }
-    
+
     return sanitize_for_json(result)
 
 # PYTORCH MODEL COMPONENTS
@@ -566,7 +567,7 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
     Staged hyperparameter search: 30-epoch probe on ~35% configs, then 150-epoch
     full training on top 5 performers. Searches lookback, hidden_size, learning_rate,
     batch_size, differencing, scaling, and smoothing options.
-    
+
     Returns: Best config dict with tuned hyperparameters
     """
     data_size = len(data)
@@ -665,6 +666,7 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
     results = []
     bad_configs = []
     best_mape_so_far = float('inf')
+    skipped = 0
 
     for i, config in enumerate(phase1_configs, 1):
         if any(_is_similar(config, bc) for bc in bad_configs):
@@ -687,6 +689,7 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
 
         if len(data) < train_window + horizon:
             print("  ⏭️  SKIPPING: Not enough data")
+            skipped += 1
             continue
 
         smoothing_method = None
@@ -758,26 +761,12 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
             bad_configs.append(config)
             continue
 
+    if skipped == len(phase1_configs):
+        return ("All configurations were skipped due to insufficient data vs horizon.")
+
     # PHASE 2
     valid_results = [r for r in results if 'error' not in r and r.get(
-        'mape', float('inf')) < float('inf')]
-
-    if not valid_results:
-        safe_lookback = min(60, len(data) // 4)
-        best_config = {
-            'lookback': safe_lookback,
-            'hidden_size': 64,
-            'num_layers': 2,
-            'dropout': 0.2,
-            'learning_rate': 0.001,
-            'epochs': config_epochs,
-            'batch_size': 128,
-            'use-differencing': False,
-            'scaler-type': 'standard',
-        }
-        print(
-            f"\n⚠️  No valid config found in Phase 1, using fallback: lookback={safe_lookback}")
-        return best_config
+        'mape', float('inf')) < float('inf') and r.get('mape', float('inf')) < 50.0]
 
     valid_results.sort(key=lambda x: x['mape'])
     top_n = min(5, len(valid_results))
@@ -806,6 +795,7 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
                 print(f"    {key}: {val}")
 
         lookback = full_config['lookback']
+        epochs = full_config['epochs']
         train_window = lookback + horizon
 
         smoothing_method = None
@@ -840,7 +830,7 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
                 smoothing_method=smoothing_method,
                 smoothing_window=smoothing_window,
                 smoothing_alpha=smoothing_alpha,
-                epochs=150,
+                epochs=epochs,
                 verbose=True
             )
 
@@ -893,19 +883,27 @@ def tune_lstm_attention(data: pd.Series, horizon: int) -> dict:
         f"✓ Best config found: lookback={best_config['lookback']}, MAPE={best_mape:.2f}%")
     print(f"{'='*70}\n")
 
-    return best_config
+    if best_mape < 50.0:
+        return best_config
+    else:
+        return "No suitable config found with MAPE < 50%."
 
 
 def tune_and_forecast(data: pd.Series, horizon: int, evaluation: bool = True) -> Dict[str, Any]:
     """
     Complete pipeline: tune hyperparameters, train model, generate predictions.
-    
+
     If evaluation=True: predict last `horizon` points and return metrics.
     If evaluation=False: train on all data and forecast future `horizon` points.
-    
+
     Returns: {predictions, actuals?, metrics?, train_data, smoothed_train_data?, ...}
     """
     best_config = tune_lstm_attention(data, horizon)
+
+    if type(best_config) is str:
+        return {'error': best_config}
+
+    print(best_config)
 
     print(f"\n{'='*60}")
     print("BEST CONFIG FOUND:")

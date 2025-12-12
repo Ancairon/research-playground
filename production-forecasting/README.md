@@ -129,6 +129,9 @@ curl -k -X POST https://localhost:5000/forecast \
 - **Gradient clipping**: Prevents exploding gradients
 - **Reproducibility**: Fixed random seeds (seed=42 (duh :D))
 
+**Important**
+If MAPE exceeds 50% we will refuse to forecast, as the provided data has outside events in it and can't be forecasted.
+
 ## Visualization
 
 When `invoke_helper=true`, the system generates an interactive Chart.js plot showing:
